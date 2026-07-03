@@ -172,15 +172,25 @@ TEST_CASE( "Fast early termination" ) {
 
 	std::atomic<int> count1(0);
 	std::thread thread1([dispatch, &count1]() {
-		dispatch->dispatch({2, 5, 100, 10}, [&count1](Flattener<>& flattener, size_t flatIndex){
-			std::this_thread::sleep_for (std::chrono::milliseconds(10));
-			count1++;
-		});
+		try {
+			dispatch->dispatch({2, 5, 100, 10}, [&count1](Flattener<>& flattener, size_t flatIndex){
+				std::this_thread::sleep_for (std::chrono::milliseconds(10));
+				count1++;
+			});
+		} catch(const std::logic_error&) {
+			// terminate() ran before thread1's dispatch() call reached the front of the
+			// race; a dispatch() call after termination throws instead of proceeding.
+		}
 	});
 
-	// Terminate early
-	delete dispatch;
+	// Terminate early -- safe regardless of whether thread1 has started dispatch() yet,
+	// because terminate() waits for a dispatch() call already in flight to finish, and a
+	// dispatch() call that starts afterward throws instead of racing with termination.
+	// Still must join thread1 before deleting though: a thread that hasn't attempted
+	// dispatch() at all yet isn't something terminate() can wait for -- see Dispatcher.hpp.
+	dispatch->terminate();
 	thread1.join();
+	delete dispatch;
 
 	CHECK(10000 > count1);
 }
@@ -208,94 +218,70 @@ TEST_CASE( "Early termination half way through" ) {
 	CHECK(10000 > count1);
 }
 
-TEST_CASE( "Repeated destroy-before-join stresses the terminate()/dispatch() race" ) {
-	// terminate() (called from ~Dispatcher()) reads currentJob without holding jobMutex
-	// (Dispatcher.hpp:88), and can return -- letting the Dispatcher be destroyed -- while
-	// another thread is still inside dispatch() on it (Dispatcher.hpp:172-191). This is a
-	// genuine data race / use-after-free, not just a theoretical one: under
-	// -fsanitize=thread this loop reliably reproduces both a TSan race report pointing at
-	// Dispatcher.hpp:88 vs Dispatcher.hpp:188, and (even without a sanitizer, occasionally)
-	// a hard crash locking an already-destroyed mutex ("mutex lock failed: Invalid
-	// argument"). A plain Debug/Release build without a sanitizer is unlikely to observe a
-	// failure here -- this loop exists so the race has many chances to manifest when this
-	// suite is run under ThreadSanitizer or AddressSanitizer, not as a reliable assertion
-	// in an unsanitized run.
+TEST_CASE( "Repeated terminate()-races-with-dispatch() stays race-free" ) {
+	// Regression coverage for a fixed bug: terminate() used to be able to return (letting
+	// ~Dispatcher() proceed to destroy the object) while another thread was still inside
+	// dispatch() on the same instance, and separately read currentJob without holding
+	// jobMutex. terminate() now waits for a dispatch() call already in flight to finish,
+	// and rejects (throws on) one that starts afterward instead of racing with it. This
+	// loop hammers many interleavings of "terminate() vs. a concurrent dispatch() call
+	// that may or may not have started yet" with no synchronizing sleep -- run under
+	// -fsanitize=thread for the strongest check.
 	for(int i = 0; i < 200; ++i) {
 		Dispatcher* dispatch = new Dispatcher(8);
 		std::atomic<int> count1(0);
 		std::thread thread1([dispatch, &count1]() {
-			dispatch->dispatch({2, 5, 20, 10}, [&count1](Flattener<>& flattener, size_t flatIndex){
-				count1++;
-			});
+			try {
+				dispatch->dispatch({2, 5, 20, 10}, [&count1](Flattener<>& flattener, size_t flatIndex){
+					count1++;
+				});
+			} catch(const std::logic_error&) {
+				// Expected when terminate() wins the race to start first.
+			}
 		});
 
-		// Terminate early, before thread1 necessarily even started dispatch()
-		delete dispatch;
+		dispatch->terminate();
 		thread1.join();
-	}
-}
-
-TEST_CASE( "Concurrent dispatch() calls do not silently corrupt state in a release (NDEBUG) build" ) {
-	// The only thing preventing two concurrent dispatch() calls on the same instance from
-	// corrupting `currentJob` is `ensure(currentJob == nullptr, ...)` (Dispatcher.hpp:171),
-	// which compiles to a no-op with the condition unevaluated under NDEBUG. This test
-	// documents the desired behavior (concurrent dispatch() must not silently hang/corrupt
-	// state) using a bounded wait rather than an unbounded join, so a regression here fails
-	// the test instead of hanging the suite. It only exercises the current build's actual
-	// NDEBUG-ness (Debug builds have ensure() active and would instead abort the whole test
-	// process on this scenario, which Catch2 can't catch as a normal test failure -- see
-	// Dispatcher-ndebug-test.cpp for the dedicated NDEBUG build of this same scenario).
-#ifdef NDEBUG
-	// Heap-allocate and deliberately leak on the buggy path: threadA can be permanently
-	// stuck inside dispatch() on this instance, so destroying it out from under that thread
-	// would trigger the separate destructor race covered by the test above.
-	Dispatcher* dispatch = new Dispatcher(8);
-
-	std::promise<void> aDone;
-	auto aDoneFuture = aDone.get_future();
-	std::thread threadA([dispatch, &aDone]() {
-		dispatch->dispatch({2, 5, 200, 10}, [](Flattener<>& flattener, size_t flatIndex){
-			std::this_thread::sleep_for(std::chrono::microseconds(50));
-		});
-		aDone.set_value();
-	});
-
-	// Give threadA a chance to actually enter dispatch() and set currentJob before threadB does.
-	std::this_thread::sleep_for(std::chrono::milliseconds(20));
-
-	std::thread threadB([dispatch]() {
-		dispatch->dispatch({4}, [](Flattener<>& flattener, size_t flatIndex){});
-	});
-	threadB.join();
-
-	auto status = aDoneFuture.wait_for(std::chrono::seconds(5));
-	if(status == std::future_status::timeout) {
-		threadA.detach();
-		FAIL("threadA's dispatch() call never completed -- a concurrent dispatch() call "
-		     "silently overwrote currentJob and orphaned threadA's job (leak + permanent hang)");
-	} else {
-		threadA.join();
 		delete dispatch;
 	}
-#else
-	SUCCEED("built without NDEBUG -- see Dispatcher-ndebug-test.cpp for this scenario under NDEBUG");
-#endif
 }
 
-TEST_CASE( "dispatch() after terminate() silently does no work instead of erroring" ) {
-	// Once terminate() has run, terminateAll is permanently true and the worker pool is
-	// gone. A later dispatch() call still passes the ensure() guard and sets currentJob,
-	// but its wait predicate (job->complete() || terminateAll) is already satisfied by
-	// terminateAll alone, so it returns almost immediately without ever invoking the
-	// worker -- silently, with no exception or other signal to the caller. This documents
-	// that behavior; it's a design/robustness gap, not a memory-safety bug.
+TEST_CASE( "Concurrent dispatch() calls on the same instance throw instead of corrupting state" ) {
+	// The only thing preventing two concurrent dispatch() calls on the same instance from
+	// corrupting currentJob is the throw_if() guard in dispatch() (Dispatcher.hpp:184-185).
+	// Unlike ensure(), throw_if() is active regardless of NDEBUG, so this holds in both
+	// Debug and Release builds. Use a promise set from inside the worker (rather than a
+	// fixed sleep) to know for certain threadA has set currentJob before attempting the
+	// second, concurrent call.
+	Dispatcher dispatch(8);
+
+	std::promise<void> aStarted;
+	auto aStartedFuture = aStarted.get_future();
+	std::atomic<int> countA(0);
+	std::thread threadA([&]() {
+		dispatch.dispatch({2, 5, 200, 10}, [&](Flattener<>& flattener, size_t flatIndex){
+			if(flatIndex == 0)
+				aStarted.set_value();
+			std::this_thread::sleep_for(std::chrono::microseconds(50));
+			countA++;
+		});
+	});
+
+	aStartedFuture.wait();
+
+	CHECK_THROWS_AS(dispatch.dispatch({4}, [](Flattener<>& flattener, size_t flatIndex){}), std::logic_error);
+
+	threadA.join();
+}
+
+TEST_CASE( "dispatch() after terminate() throws instead of silently doing no work" ) {
 	Dispatcher dispatch(4);
 	dispatch.terminate();
 
 	std::atomic<int> count(0);
-	dispatch.dispatch(100, [&count](Flattener<>& flattener, size_t flatIndex){
+	CHECK_THROWS_AS(dispatch.dispatch(100, [&count](Flattener<>& flattener, size_t flatIndex){
 		count++;
-	});
+	}), std::logic_error);
 
 	CHECK(0 == count);
 }

@@ -22,6 +22,7 @@
 #include <condition_variable>
 #include <vector>
 #include <atomic>
+#include <stdexcept>
 #include "Flattener.hpp"
 
 // Ensure.hpp is an optional dependency: if it's available (either as part of this
@@ -71,9 +72,10 @@ namespace thr {
 		 * Terminate all activities in this Dispatcher.
 		 */
 		void terminate() {
-			std::unique_lock<std::mutex> jobLock(jobMutex);
-			terminateAll = true;
-			jobLock.unlock();
+			{
+				std::lock_guard<std::mutex> guard(jobMutex);
+				terminateAll = true;
+			}
 
 			// Wake up any sleeping threads.  They will check the terminate flag and
 			// exit their run loop immediately upon waking.
@@ -83,10 +85,22 @@ namespace thr {
 				workerThread.join();
 			threads.clear();
 
-			// If a dispatch() call is still waiting on a job that never reached
-			// completion, wake it so it can clean up.
+			std::unique_lock<std::mutex> jobLock(jobMutex);
+			// Every worker is confirmed done touching the current job (if any) now that
+			// they're all joined, so it's safe for a dispatch() call still waiting on
+			// this job to treat termination alone as license to stop waiting.
+			allWorkersJoined = true;
 			if(currentJob != nullptr)
 				currentJob->conditionalVariable.notify_all();
+
+			// Wait for any dispatch() call already in flight on this instance to finish
+			// clearing currentJob before returning -- otherwise our caller (often
+			// ~Dispatcher()) could destroy this object while that other thread still
+			// expects jobMutex/currentJob to exist. A dispatch() call that hasn't
+			// started yet by the time this returns is the caller's responsibility to
+			// rule out (e.g. by joining any thread that might call dispatch() before
+			// destroying this object), the same as with any other shared resource.
+			jobConditionVariable.wait(jobLock, [this]{ return currentJob == nullptr; });
 		}
 
 		/**
@@ -159,34 +173,42 @@ namespace thr {
 		 * @param worker The worker that the dispatcher will call to process the space
 		 */
 		void dispatch(Flattener<> dimensions, const std::function<void(Flattener<>&, size_t)>& worker) {
-			// Construct a new job
-			Job* job = new Job(dimensions, worker);
-
 			// Dispatcher only ever runs one job at a time. dispatch() blocks the calling
-			// thread until the job completes, so this only fires if a second thread calls
-			// dispatch() on the same Dispatcher concurrently -- unsupported; put a
-			// thr::Queue in front if you need to serialize dispatch() calls from multiple
-			// threads.
-			std::unique_lock<std::mutex> jobLock(jobMutex);
-			ensure(currentJob == nullptr, "Dispatcher does not support concurrent dispatch() calls on the same instance");
-			currentJob = job;
-			jobLock.unlock();
+			// thread until the job completes, so a second thread calling dispatch() on
+			// the same Dispatcher concurrently, or any dispatch() call after terminate()
+			// has run, is a caller usage error -- unsupported; put a thr::Queue in front
+			// if you need to serialize dispatch() calls from multiple threads.
+			Job* job;
+			{
+				std::lock_guard<std::mutex> guard(jobMutex);
+				throw_if<std::logic_error>(terminateAll, "dispatch() called on a terminated Dispatcher");
+				throw_if<std::logic_error>(currentJob != nullptr, "Dispatcher does not support concurrent dispatch() calls on the same instance");
+				job = new Job(dimensions, worker);
+				currentJob = job;
+			}
 
 			// Notify all worker threads that new work is available
 			jobConditionVariable.notify_all();
 
-			// Wait for the job to complete
-			std::unique_lock<std::mutex> jobCompletionLock(job->mutex);
-			if(!job->complete() && !terminateAll) {
-				job->conditionalVariable.wait(jobCompletionLock, [job,this]{
-					return job->complete() || terminateAll;
-				});
+			// Wait for the job to complete. allWorkersJoined (rather than terminateAll)
+			// is the signal that it's safe to stop waiting on termination alone -- it's
+			// only set after terminate() has confirmed every worker thread has actually
+			// stopped touching this job, whereas terminateAll flips true well before that.
+			{
+				std::unique_lock<std::mutex> jobCompletionLock(job->mutex);
+				if(!job->complete() && !allWorkersJoined) {
+					job->conditionalVariable.wait(jobCompletionLock, [job,this]{
+						return job->complete() || allWorkersJoined;
+					});
+				}
 			}
-			jobCompletionLock.unlock();
 
-			jobLock.lock();
-			currentJob = nullptr;
-			jobLock.unlock();
+			{
+				std::lock_guard<std::mutex> guard(jobMutex);
+				currentJob = nullptr;
+			}
+			// Let a terminate() call that's waiting for this job to finish know it can proceed.
+			jobConditionVariable.notify_all();
 
 			delete job;
 		}
@@ -221,6 +243,10 @@ namespace thr {
 
 					// Is this job complete?
 					if(job->complete()) {
+						// All completed jobs must have been previously depleted -- there's no way
+						// to complete a work unit that was never allocated.
+						ensure(job->depleted());
+
 						// Notify dispatch() that it can clean up the Job.
 						job->conditionalVariable.notify_all();
 
@@ -257,8 +283,8 @@ namespace thr {
 			Flattener<> dimensions;
 			const std::function<void(Flattener<>&, size_t)> workFunction;
 
-			std::atomic<size_t> allocated = {0};	// How many work units have been allocated to threads, protected by Dispatcher::jobMutex
-			std::atomic<size_t> completed = {0};	// How many work units were completed, protected by Job::mutex
+			size_t allocated = 0;	// How many work units have been allocated to threads, protected by Dispatcher::jobMutex
+			size_t completed = 0;	// How many work units were completed, protected by Job::mutex
 
 			std::condition_variable conditionalVariable;
 			std::mutex mutex;
@@ -269,6 +295,11 @@ namespace thr {
 		unsigned int threadCount = 0;
 		std::vector<std::thread> threads;
 		std::atomic<bool> terminateAll = {false};
+
+		// Set by terminate(), only after every worker thread is confirmed joined (and so
+		// guaranteed done touching the current job, if any). Read across jobMutex/job->mutex
+		// without a single consistent lock, hence atomic -- see dispatch()'s wait predicate.
+		std::atomic<bool> allWorkersJoined = {false};
 
 		// The job currently being run, or nullptr if this Dispatcher is idle.
 		// Dispatcher only supports one job in flight at a time.
