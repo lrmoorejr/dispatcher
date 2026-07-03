@@ -285,3 +285,82 @@ TEST_CASE( "dispatch() after terminate() throws instead of silently doing no wor
 
 	CHECK(0 == count);
 }
+
+TEST_CASE( "Repeated explicit terminate() calls are idempotent" ) {
+	Dispatcher dispatch(4);
+	std::atomic<int> count(0);
+	dispatch.dispatch(10, [&count](Flattener<>& flattener, size_t flatIndex){
+		count++;
+	});
+
+	dispatch.terminate();
+	dispatch.terminate();
+	dispatch.terminate();
+
+	CHECK(10 == count);
+}
+
+TEST_CASE( "getThreadCount() still reports the original count after terminate()" ) {
+	Dispatcher dispatch(6);
+	CHECK(6 == dispatch.getThreadCount());
+
+	dispatch.terminate();
+
+	CHECK(6 == dispatch.getThreadCount());
+}
+
+TEST_CASE( "Reentrant dispatch() from within a worker callback throws instead of hanging" ) {
+	// A worker callback calling dispatch() again on the *same* instance looks identical to
+	// a concurrent call from another thread as far as the currentJob guard is concerned --
+	// it throws cleanly rather than deadlocking or corrupting state.
+	Dispatcher dispatch(4);
+	bool innerThrew = false;
+
+	dispatch.dispatch(4, [&](Flattener<>& flattener, size_t flatIndex){
+		if(flatIndex == 0) {
+			try {
+				dispatch.dispatch(2, [](Flattener<>& f, size_t i){});
+			} catch(const std::logic_error&) {
+				innerThrew = true;
+			}
+		}
+	});
+
+	CHECK(innerThrew);
+}
+
+TEST_CASE( "A worker callback that throws propagates to the dispatch() caller instead of aborting" ) {
+	std::atomic<int> count(0);
+	Dispatcher dispatch(4);
+
+	CHECK_THROWS_AS(dispatch.dispatch(20, [&count](Flattener<>& flattener, size_t flatIndex){
+		count++;
+		if(flatIndex == 5)
+			throw std::runtime_error("worker callback failure");
+	}), std::runtime_error);
+
+	// The other 19 work units still ran to completion despite the one failure.
+	CHECK(20 == count);
+}
+
+TEST_CASE( "terminate() called from within one of its own worker callbacks throws instead of hanging" ) {
+	// terminate() would otherwise end up joining the very thread running this callback.
+	// That's rejected immediately (before touching any state) rather than either crashing
+	// on a self-join std::system_error, or -- worse, and what actually happened before this
+	// guard was added -- silently abandoning the in-flight job's remaining work units and
+	// hanging the dispatch() call below forever, since neither job->complete() nor
+	// allWorkersJoined could ever become true afterward.
+	Dispatcher* dispatch = new Dispatcher(4);
+	std::atomic<int> count(0);
+
+	CHECK_THROWS_AS(dispatch->dispatch(4, [&](Flattener<>& flattener, size_t flatIndex){
+		count++;
+		if(flatIndex == 0)
+			dispatch->terminate();
+	}), std::logic_error);
+
+	// The job still ran to completion -- the rejected terminate() call had no side effects.
+	CHECK(4 == count);
+
+	delete dispatch;
+}

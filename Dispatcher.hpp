@@ -23,6 +23,7 @@
 #include <vector>
 #include <atomic>
 #include <stdexcept>
+#include <exception>
 #include "Flattener.hpp"
 
 // Ensure.hpp is an optional dependency: if it's available (either as part of this
@@ -72,6 +73,20 @@ namespace thr {
 		 * Terminate all activities in this Dispatcher.
 		 */
 		void terminate() {
+			// Serializes concurrent terminate() calls from different threads against each
+			// other (they'd otherwise race on `threads` below), and against this thread
+			// being one of the very worker threads terminate() is about to join() -- that
+			// would either throw a self-join std::system_error partway through (if this
+			// check didn't catch it first) or, worse, silently abandon the in-flight job's
+			// remaining work units before completing, hanging the dispatch() call that's
+			// waiting on this job forever. Reject it immediately, before touching any
+			// state, so a rejected call has no side effects on the still-running job.
+			std::lock_guard<std::mutex> terminateGuard(terminateMutex);
+			for(const std::thread& workerThread : threads) {
+				throw_if<std::logic_error>(workerThread.get_id() == std::this_thread::get_id(),
+					"terminate() cannot be called from within one of this Dispatcher's own worker callbacks");
+			}
+
 			{
 				std::lock_guard<std::mutex> guard(jobMutex);
 				terminateAll = true;
@@ -194,6 +209,7 @@ namespace thr {
 			// is the signal that it's safe to stop waiting on termination alone -- it's
 			// only set after terminate() has confirmed every worker thread has actually
 			// stopped touching this job, whereas terminateAll flips true well before that.
+			std::exception_ptr caughtException;
 			{
 				std::unique_lock<std::mutex> jobCompletionLock(job->mutex);
 				if(!job->complete() && !allWorkersJoined) {
@@ -201,6 +217,9 @@ namespace thr {
 						return job->complete() || allWorkersJoined;
 					});
 				}
+				// Grab this while job is still alive; exception_ptr itself doesn't depend
+				// on Job's lifetime once copied out, so it's safe to rethrow after delete.
+				caughtException = job->exception;
 			}
 
 			{
@@ -211,6 +230,13 @@ namespace thr {
 			jobConditionVariable.notify_all();
 
 			delete job;
+
+			// Surface the first exception thrown by any work unit to the caller of
+			// dispatch(), rather than letting it escape the worker thread that hit it
+			// (which would otherwise call std::terminate() and abort the whole process --
+			// see workerThread()). Other work units still run to completion regardless.
+			if(caughtException)
+				std::rethrow_exception(caughtException);
 		}
 
 		/**
@@ -269,8 +295,17 @@ namespace thr {
 
 				jobLock.unlock();
 
-				// Do some work
-				job->workFunction(job->dimensions, flatIndex);
+				// Do some work. Catch anything it throws rather than letting it escape
+				// this thread's entry function -- an uncaught exception there would call
+				// std::terminate() and abort the whole process. dispatch() rethrows the
+				// first one it sees to its caller once the job finishes instead.
+				try {
+					job->workFunction(job->dimensions, flatIndex);
+				} catch(...) {
+					std::lock_guard<std::mutex> guard(job->mutex);
+					if(!job->exception)
+						job->exception = std::current_exception();
+				}
 			}
 		}
 
@@ -285,6 +320,10 @@ namespace thr {
 
 			size_t allocated = 0;	// How many work units have been allocated to threads, protected by Dispatcher::jobMutex
 			size_t completed = 0;	// How many work units were completed, protected by Job::mutex
+
+			// The first exception thrown by any work unit, if any; protected by mutex.
+			// Later ones are discarded -- work units still run to completion regardless.
+			std::exception_ptr exception;
 
 			std::condition_variable conditionalVariable;
 			std::mutex mutex;
@@ -307,5 +346,8 @@ namespace thr {
 
 		std::condition_variable jobConditionVariable;
 		std::mutex jobMutex;
+
+		// Serializes terminate() against concurrent calls to itself (see terminate()).
+		std::mutex terminateMutex;
 	};
 };
