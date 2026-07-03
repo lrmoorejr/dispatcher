@@ -1,0 +1,13 @@
+build/
+build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+.cmake/
+Dispatcher-test
+BatchDispatcher-test
+SlowDispatcher-test
+.DS_Store
+.vscode/
+.idea/
