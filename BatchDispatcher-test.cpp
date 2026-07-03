@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include <future>
+#include <stdexcept>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "BatchDispatcher.hpp"
@@ -206,4 +208,65 @@ TEST_CASE( "Unbashed default dispatch, 300 count" ) {
 	});
 
 	CHECK(300 == count);
+}
+
+TEST_CASE( "Concurrent dispatch() calls on the same instance throw instead of corrupting state" ) {
+	// flattener/maxBatch/worker/allocated are instance members, so a second dispatch()
+	// call on the same instance while one is already in flight would otherwise race on
+	// them. Use a promise set from inside the worker (rather than a fixed sleep) to know
+	// for certain threadA's call has actually started before attempting the second one.
+	BatchDispatcher<> dispatch(8);
+
+	std::promise<void> aStarted;
+	auto aStartedFuture = aStarted.get_future();
+	std::atomic<int> countA(0);
+	std::thread threadA([&]() {
+		dispatch.dispatch(2000, 7, [&](const Flattener<>& flattener, size_t start, unsigned int batch){
+			if(start == 0)
+				aStarted.set_value();
+			std::this_thread::sleep_for(std::chrono::microseconds(50));
+			countA += batch;
+		});
+	});
+
+	aStartedFuture.wait();
+
+	CHECK_THROWS_AS(dispatch.dispatch(4, 1, [](const Flattener<>& flattener, size_t start, unsigned int batch){}), std::logic_error);
+
+	threadA.join();
+	CHECK(2000 == countA);
+}
+
+TEST_CASE( "A worker callback that throws propagates to the dispatch() caller instead of aborting" ) {
+	std::atomic<int> count(0);
+	BatchDispatcher<> dispatch(4);
+
+	CHECK_THROWS_AS(dispatch.dispatch(20, 1, [&count](const Flattener<>& flattener, size_t start, unsigned int batch){
+		count += batch;
+		if(start == 5)
+			throw std::runtime_error("worker callback failure");
+	}), std::runtime_error);
+
+	// The other 19 work units still ran to completion despite the one failure.
+	CHECK(20 == count);
+}
+
+TEST_CASE( "Reentrant dispatch() from within a worker callback throws instead of corrupting state" ) {
+	// A worker callback calling dispatch() again on the same instance looks identical to a
+	// concurrent call from another thread as far as the inProgress guard is concerned -- it
+	// throws cleanly rather than corrupting flattener/maxBatch/worker/allocated.
+	BatchDispatcher<> dispatch(4);
+	bool innerThrew = false;
+
+	dispatch.dispatch(4, 1, [&](const Flattener<>& flattener, size_t start, unsigned int batch){
+		if(start == 0) {
+			try {
+				dispatch.dispatch(2, 1, [](const Flattener<>& f, size_t s, unsigned int b){});
+			} catch(const std::logic_error&) {
+				innerThrew = true;
+			}
+		}
+	});
+
+	CHECK(innerThrew);
 }

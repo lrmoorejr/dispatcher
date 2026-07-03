@@ -16,6 +16,7 @@
  * limitations under the License.
  */
 
+#include <atomic>
 #include "Flattener.hpp"
 
 namespace thr {
@@ -93,6 +94,11 @@ namespace thr {
 		};
 
 		const unsigned int threadCount = 1;
-		bool terminateAll = false;
+		// Atomic because terminate() can legitimately be called from a different thread
+		// than the one currently inside dispatch()'s loop (see "Overlapping jobs" and
+		// "Early termination" tests) -- a plain bool read/written across threads without
+		// synchronization would be a data race even though SlowDispatcher itself never
+		// spawns any threads.
+		std::atomic<bool> terminateAll = {false};
 	};
 };

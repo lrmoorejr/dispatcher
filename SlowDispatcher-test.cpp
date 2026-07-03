@@ -15,6 +15,7 @@
  */
 
 #include <thread>
+#include <stdexcept>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "SlowDispatcher.hpp"
@@ -236,4 +237,53 @@ TEST_CASE("SlowDispatcher Early termination half way through" ) {
 
 	CHECK(0 < count1);
 	CHECK(10000 > count1);
+}
+
+TEST_CASE("SlowDispatcher Repeated explicit terminate() calls are idempotent") {
+	SlowDispatcher dispatch;
+	std::atomic<int> count(0);
+	dispatch.dispatch(10, [&count](Flattener<>& flattener, size_t flatIndex){
+		count++;
+	});
+
+	dispatch.terminate();
+	dispatch.terminate();
+	dispatch.terminate();
+
+	CHECK(10 == count);
+}
+
+TEST_CASE("SlowDispatcher terminate() called from within its own dispatch() callback stops the loop safely") {
+	// Unlike Dispatcher, SlowDispatcher never spawns a thread, so there's no self-join
+	// hazard here -- the callback runs on the same thread as the for-loop it's calling
+	// terminate() on, so this is just an ordinary early-exit, no guard needed.
+	SlowDispatcher dispatch;
+	std::atomic<int> count(0);
+
+	dispatch.dispatch(100, [&](Flattener<>& flattener, size_t flatIndex){
+		count++;
+		if(flatIndex == 4)
+			dispatch.terminate();
+	});
+
+	CHECK(5 == count); // indices 0..4 ran before terminateAll stopped the loop
+}
+
+TEST_CASE("SlowDispatcher worker callback exceptions propagate normally, no thread boundary involved") {
+	// dispatch() is a plain synchronous loop on the caller's own thread, so an exception
+	// from the callback needs no special handling -- it just propagates like it would from
+	// any ordinary function call, unlike Dispatcher/BatchDispatcher where it would otherwise
+	// escape a separate worker thread and abort the process.
+	SlowDispatcher dispatch;
+	std::atomic<int> count(0);
+
+	CHECK_THROWS_AS(dispatch.dispatch(20, [&count](Flattener<>& flattener, size_t flatIndex){
+		count++;
+		if(flatIndex == 5)
+			throw std::runtime_error("callback failure");
+	}), std::runtime_error);
+
+	// Single-threaded and synchronous: the loop stops dead at the throw, unlike the
+	// parallel dispatchers where other already-running units still finish regardless.
+	CHECK(6 == count);
 }

@@ -19,7 +19,9 @@
 #include <functional>
 #include <thread>
 #include <vector>
-#include <cassert>
+#include <atomic>
+#include <exception>
+#include <stdexcept>
 #include "Flattener.hpp"
 
 namespace thr {
@@ -137,16 +139,32 @@ namespace thr {
 		 * @param worker The worker that the dispatcher will call to process the space
 		 */
 		void dispatch(const Flattener<T>& flattener, unsigned int maxBatch, const std::function<void(const Flattener<T>&, T, unsigned int)>& worker) {
+			// flattener/maxBatch/worker/allocated are instance members rather than local
+			// state (unlike Dispatcher's Job), so a second concurrent or reentrant call on
+			// this same instance would otherwise race on them -- reject it immediately,
+			// before touching any of that state, rather than letting it corrupt things.
+			throw_if<std::logic_error>(inProgress.exchange(true), "BatchDispatcher does not support concurrent dispatch() calls on the same instance");
+
 			this->flattener = &flattener;
 			this->maxBatch = maxBatch;
 			this->worker = worker;
 			allocated = 0;
+			caughtException = nullptr;
 
 			for(size_t threadIndex = 0; threadIndex < threadCount; ++threadIndex)
 				threads.emplace_back(&BatchDispatcher::workerThread, this);
 			for(std::thread& workerThread : threads)
 				workerThread.join();
 			threads.clear();
+
+			inProgress = false;
+
+			// Surface the first exception thrown by any work unit to the caller of
+			// dispatch(), rather than letting it escape the worker thread that hit it
+			// (which would otherwise call std::terminate() and abort the whole process --
+			// see workerThread()). Other work units still run to completion regardless.
+			if(caughtException)
+				std::rethrow_exception(caughtException);
 		}
 
 		/**
@@ -166,23 +184,32 @@ namespace thr {
 		void workerThread() {
 			for(;;) {
 				// Allocate work
-				mutex.lock();
-				const T todo = flattener->size() - allocated;
-				if(todo == 0) {
-					// No work left
-					mutex.unlock();
-					return;
+				T start;
+				unsigned int batchSize;
+				{
+					std::lock_guard<std::mutex> guard(mutex);
+					const T todo = flattener->size() - allocated;
+					if(todo == 0)
+						return;
+
+					start = allocated;
+					batchSize = maxBatch;
+					if(todo < maxBatch)
+						batchSize = std::max<unsigned int>(1, static_cast<unsigned int>(todo / threadCount));
+					allocated += batchSize;
 				}
 
-				const T start = allocated;
-				unsigned int batchSize = maxBatch;
-				if(todo < maxBatch)
-					batchSize = std::max<unsigned int>(1, static_cast<unsigned int>(todo / threadCount));
-				allocated += batchSize;
-				mutex.unlock();
-
-				// Do some work
-				worker(*flattener, start, batchSize);
+				// Do some work. Catch anything it throws rather than letting it escape
+				// this thread's entry function -- an uncaught exception there would call
+				// std::terminate() and abort the whole process. dispatch() rethrows the
+				// first one it sees to its caller once every thread has finished instead.
+				try {
+					worker(*flattener, start, batchSize);
+				} catch(...) {
+					std::lock_guard<std::mutex> guard(mutex);
+					if(!caughtException)
+						caughtException = std::current_exception();
+				}
 			}
 		}
 
@@ -195,5 +222,14 @@ namespace thr {
 		std::function<void(const Flattener<T>&, T, unsigned int)> worker;
 
 		T allocated = 0;
+
+		// Guards against a second dispatch() call (concurrent or reentrant) running on
+		// this instance while one is already in flight -- see dispatch().
+		std::atomic<bool> inProgress = {false};
+
+		// The first exception thrown by any work unit in the current dispatch() call, if
+		// any; protected by mutex. Later ones are discarded -- work units still run to
+		// completion regardless.
+		std::exception_ptr caughtException;
 	};
 }
