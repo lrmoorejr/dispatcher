@@ -67,7 +67,9 @@ buffer it for you.
 - Header-only -- copy the header(s) you need into your project and `#include` them
 - Links against threading support -- on Linux, compile/link with `-pthread` (or your build
   system's equivalent); `SlowDispatcher` is single-threaded and needs no threading support
-- Requires [`Flattener.hpp`](https://github.com/lrmoorejr/flattener) on your include path
+- Requires [`Flattener.hpp`](https://github.com/lrmoorejr/flattener) on your include path --
+  vendored here as a git submodule (`flattener/`); clone with `--recurse-submodules` or run
+  `git submodule update --init` after cloning
 - Optional (`Dispatcher` only): [`Ensure.hpp`](https://github.com/lrmoorejr/ensure) for a
   formatted diagnostic when `dispatch()` is called concurrently on the same instance; falls back
   to plain `assert()` if not present

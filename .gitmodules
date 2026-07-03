@@ -1,0 +1,3 @@
+[submodule "flattener"]
+	path = flattener
+	url = https://github.com/lrmoorejr/flattener.git

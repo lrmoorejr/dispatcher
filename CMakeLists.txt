@@ -22,20 +22,12 @@ set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
 # Dispatcher/BatchDispatcher/SlowDispatcher all describe their parameter space
-# with a Flattener<>, so pull that header in from its own repo rather than
-# vendoring a copy that could drift. When this repo is embedded in a parent
-# build that already provides Flattener.hpp (e.g. commons), that copy wins
-# instead, since it'll already be on the include path.
-if(NOT COMMAND FetchContent_Declare)
-	include(FetchContent)
-endif()
-FetchContent_Declare(
-	flattener
-	GIT_REPOSITORY https://github.com/lrmoorejr/flattener.git
-	GIT_TAG main
-)
-FetchContent_MakeAvailable(flattener)
-include_directories(${flattener_SOURCE_DIR})
+# with a Flattener<>, so this repo depends on it as a git submodule pinned to
+# a specific commit (see flattener/, https://github.com/lrmoorejr/flattener).
+# Only its include path is needed here -- add_subdirectory(flattener) would
+# also pull in its own Flattener-test target/enable_testing(), which would
+# collide with a parent build (e.g. commons) that already provides one.
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/flattener)
 
 add_executable(Dispatcher-test Dispatcher-test.cpp Dispatcher.hpp)
 target_link_libraries(Dispatcher-test PRIVATE Catch2::Catch2WithMain Threads::Threads)
