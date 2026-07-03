@@ -47,30 +47,56 @@
 
 namespace thr {
 	/**
-	 * @brief Dispatcher manages a pool of threads that can be applied to a tensor space. The tensor
-	 * dimensions can be expressed a number of ways, but ultimately they will be translated into
-	 * a Flattener object, which allows tanslation between dimensional indices and a linear 
-	 * chunk of memory.
-	 * 
+	 * @brief Runs a callback once for every point in an N-dimensional index space (described by
+	 * a Flattener<>), spread across a persistent pool of worker threads.
+	 *
+	 * Only one dispatch() call may be in flight on a given instance at a time: dispatch() blocks
+	 * the calling thread until every point in the space has been visited (or the Dispatcher is
+	 * terminated), so a second call -- concurrent from another thread, or reentrant from within
+	 * a worker callback -- is a usage error (see dispatch()). Put a thr::Queue in front of a
+	 * Dispatcher if you need to queue up work submitted by multiple producer threads.
 	 */
 	class Dispatcher {
 	public:
 		/**
-		 * @brief Construct a new Dispatcher object with the given number of threads allocated, waiting for work.
-		 * 
-		 * @param threadCount Number of threads to allocate for this Dispatcher.  0 will use the defaultWorkerThreadCount
+		 * @brief Constructs a Dispatcher with a fixed-size pool of worker threads, idle and
+		 * waiting for work.
+		 *
+		 * @param threadCount Number of worker threads to start. 0 uses defaultWorkerThreadCount.
+		 * Defaults to std::thread::hardware_concurrency().
 		 */
 		Dispatcher(unsigned int threadCount = std::thread::hardware_concurrency()) {
 			this->threadCount = threadCount == 0 ? defaultWorkerThreadCount : threadCount;
 			for(size_t threadIndex = 0; threadIndex < threadCount; ++threadIndex)
 				threads.emplace_back(&Dispatcher::workerThread, this);
 		}
+
+		/**
+		 * @brief Destroys the Dispatcher, first calling terminate().
+		 *
+		 * @warning A thread that hasn't yet made its first dispatch() call on this instance must
+		 * be joined (or otherwise known not to call dispatch() at all) before this runs --
+		 * terminate() can only safely wait for a dispatch() call that's already in flight, not
+		 * one it has no way of knowing is coming.
+		 */
 		virtual ~Dispatcher() {
 			terminate();
 		}
 
 		/**
-		 * Terminate all activities in this Dispatcher.
+		 * @brief Stops this Dispatcher: no further work will be started, and any dispatch() call
+		 * already in flight on this instance is given the chance to unwind safely before
+		 * terminate() returns.
+		 *
+		 * Safe to call explicitly (it also runs automatically from ~Dispatcher()), safe to call
+		 * more than once (idempotent), and safe to call concurrently with an in-flight dispatch()
+		 * call from another thread -- that call either finishes the work already allocated to it
+		 * or has its wait cut short once every worker thread is confirmed stopped, whichever
+		 * comes first.
+		 *
+		 * @throws std::logic_error if called from within one of this Dispatcher's own worker
+		 * callbacks (i.e. reentrantly, from a function passed to dispatch()) -- terminate() would
+		 * otherwise need to join the very thread it's running on.
 		 */
 		void terminate() {
 			// Serializes concurrent terminate() calls from different threads against each
@@ -119,10 +145,13 @@ namespace thr {
 		}
 
 		/**
-		 * @brief Creates and executes a temporary dispatcher with a 1 dimensional space of size count
-		 * 
-		 * @param count The length of the parameter space
-		 * @param worker The worker that the dispatcher will call to process the space
+		 * @brief Constructs a temporary Dispatcher and uses it for one dispatch() call over a
+		 * 1-dimensional space of size @p count. Only useful for a single one-off dispatch, since
+		 * the thread pool doesn't outlive this call.
+		 *
+		 * @param count The length of the (1-dimensional) parameter space.
+		 * @param worker See dispatch().
+		 * @throws Same as dispatch().
 		 */
 		static void defaultDispatch(const unsigned int count, const std::function<void(Flattener<>&, size_t)>& worker) {
 			Dispatcher dispatcher;
@@ -130,10 +159,13 @@ namespace thr {
 		}
 
 		/**
-		 * @brief Creates and executes a temporary dispatcher with a shape specified by the supplied vector of dimensions
-		 * 
-		 * @param shape The shape of the parameter space expressed in dimensions
-		 * @param worker The worker that the dispatcher will call to process the space
+		 * @brief Constructs a temporary Dispatcher and uses it for one dispatch() call over the
+		 * space described by @p shape. Only useful for a single one-off dispatch, since the
+		 * thread pool doesn't outlive this call.
+		 *
+		 * @param shape The shape of the parameter space, outermost dimension first.
+		 * @param worker See dispatch().
+		 * @throws Same as dispatch().
 		 */
 		static void defaultDispatch(std::vector<unsigned int> shape, const std::function<void(Flattener<>&, size_t)>& worker) {
 			Dispatcher dispatcher;
@@ -141,10 +173,13 @@ namespace thr {
 		}
 
 		/**
-		 * @brief Creates and executes a temporary dispatcher with the shape defined in a Flattener object
-		 * 
-		 * @param dimensions THe shape of the parameter space
-		 * @param worker The worker that the dispatcher will call to process the space
+		 * @brief Constructs a temporary Dispatcher and uses it for one dispatch() call over
+		 * @p dimensions. Only useful for a single one-off dispatch, since the thread pool
+		 * doesn't outlive this call.
+		 *
+		 * @param dimensions The shape of the parameter space to cover.
+		 * @param worker See dispatch().
+		 * @throws Same as dispatch().
 		 */
 		static void defaultDispatch(Flattener<> dimensions, const std::function<void(Flattener<>&, size_t)>& worker) {
 			Dispatcher dispatcher;
@@ -152,40 +187,57 @@ namespace thr {
 		}
 
 		/**
-		 * @brief Executes the dispatcher (ie processes a space) with a 1 dimensional space of size count
-		 * 
-		 * @param count The length of the parameter space
-		 * @param worker The worker that the dispatcher will call to process the space
+		 * @brief Equivalent to dispatch(Flattener<>({count}), worker) -- covers a 1-dimensional
+		 * space of size @p count.
+		 *
+		 * @param count The length of the (1-dimensional) parameter space.
+		 * @param worker See the Flattener<> overload.
+		 * @throws Same as the Flattener<> overload.
 		 */
 		void dispatch(const unsigned int count, const std::function<void(Flattener<>&, size_t)>& worker) {
 			dispatch({count}, worker);
 		}
 
 		/**
-		 * @brief Executes the dispatcher (ie processes a space) with a shape specified by an intializer_list of dimensions
-		 * 
-		 * @param shape The shape of the parameter space expressed in dimensions
-		 * @param worker The worker that the dispatcher will call to process the space
+		 * @brief Equivalent to dispatch(Flattener<>(shape), worker).
+		 *
+		 * @param shape The shape of the parameter space, outermost dimension first.
+		 * @param worker See the Flattener<> overload.
+		 * @throws Same as the Flattener<> overload.
 		 */
 		void dispatch(std::initializer_list<unsigned int> shape, const std::function<void(Flattener<>&, size_t)>& worker) {
 			dispatch(Flattener<>(shape), worker);
 		}
 
 		/**
-		 * @brief Executes the dispatcher (ie processes a space) with a shape specified by the supplied vector of dimensions
-		 * 
-		 * @param shape The shape of the parameter space expressed in dimensions
-		 * @param worker The worker that the dispatcher will call to process the space
+		 * @brief Equivalent to dispatch(Flattener<>(shape), worker).
+		 *
+		 * @param shape The shape of the parameter space, outermost dimension first.
+		 * @param worker See the Flattener<> overload.
+		 * @throws Same as the Flattener<> overload.
 		 */
 		void dispatch(std::vector<unsigned int> shape, const std::function<void(Flattener<>&, size_t)>& worker) {
 			dispatch(Flattener<>(shape), worker);
 		}
 
 		/**
-		 * @brief Executes the dispatcher (ie processes a space) with the shape defined in a Flattener object
-		 * 
-		 * @param dimensions THe shape of the parameter space
-		 * @param worker The worker that the dispatcher will call to process the space
+		 * @brief Runs @p worker once for every flat index in @p dimensions, spread across this
+		 * Dispatcher's worker pool, blocking the calling thread until every index has been
+		 * visited (or the Dispatcher is terminated).
+		 *
+		 * @param dimensions The shape of the parameter space to cover.
+		 * @param worker Called as worker(dimensions, flatIndex) once per flat index. May run on
+		 * any worker thread, and is never called concurrently for the same index, but different
+		 * indices may run concurrently on different threads -- worker must be safe to call that
+		 * way (e.g. distinct indices must not write to overlapping state without their own
+		 * synchronization).
+		 *
+		 * @throws std::logic_error if another dispatch() call is already in flight on this
+		 * instance -- concurrently from another thread, or reentrantly from within @p worker
+		 * itself -- or if this Dispatcher has already been terminated (see terminate()).
+		 * @throws Whatever the first work unit to throw an exception threw, once every work unit
+		 * already handed out has finished running. Other work units still run to completion
+		 * regardless of one throwing.
 		 */
 		void dispatch(Flattener<> dimensions, const std::function<void(Flattener<>&, size_t)>& worker) {
 			// Dispatcher only ever runs one job at a time. dispatch() blocks the calling
@@ -240,15 +292,15 @@ namespace thr {
 		}
 
 		/**
-		 * @brief Returns the size of the thread pool for this Dispatcher
-		 * 
-		 * @return unsigned int The thread count
+		 * @brief Returns the number of worker threads in this Dispatcher's pool. Reflects the
+		 * count established at construction, even after terminate() has run.
+		 *
+		 * @return The worker thread count.
 		 */
 		unsigned int getThreadCount() { return threadCount; }
 
 		/**
-		 * @brief Default thread count when 0 is specified
-		 * 
+		 * @brief Worker thread count used when the constructor is given 0.
 		 */
 		constexpr static unsigned int defaultWorkerThreadCount = 4;
 

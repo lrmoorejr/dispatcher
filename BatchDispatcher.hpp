@@ -26,32 +26,41 @@
 
 namespace thr {
 	/**
-	 * @brief Similar to Dispatch in principle, but BatchDispatch sends blocks of data to the dispatch worker function.
-	 * The intention is that this class is better at handling situations where each thread has a very small amount of work 
-	 * to do.  In these circumstances, the overhead of Dispatch can outweigh the advantage of multithreaded computation.
-	 * BatchDispatch solves this by allowing each thread to run batches of processing so that the overhead of BatchDispatch
-	 * is negligeable by comparison.
-	 * 
-	 * @tparam T The type to use for indexing the space.  Must be large enough to index the entire space.
+	 * @brief Like Dispatcher, but hands each thread a contiguous batch of flat indices per
+	 * callback instead of one index at a time, so the per-callback overhead is amortized across
+	 * the whole batch. Prefer this over Dispatcher when each individual unit of work is cheap
+	 * enough that Dispatcher's per-index dispatch overhead would dominate.
+	 *
+	 * Only one dispatch() call may be in flight on a given instance at a time (see dispatch()).
+	 * Unlike Dispatcher, a BatchDispatcher doesn't keep worker threads around between calls --
+	 * each dispatch() call spawns a fresh batch of threads and joins all of them before
+	 * returning, so there's no separate terminate()/destructor-lifetime contract to worry about;
+	 * destroying a BatchDispatcher is always safe once no dispatch() call on it is in flight.
+	 *
+	 * @tparam T The type used to index the space. Must be able to represent the total number of
+	 * points in the space.
 	 */
 	template<typename T=size_t>
 	class BatchDispatcher {
 	public:
 		/**
-		 * @brief Construct a new BatchDispatcher object with the specified thead count.  If unspecified, the thread count
-		 * used is based on the number of threads available on the system.  If 0, then defaultWorkerThreadCount threads will be reserved.
-		 * 
-		 * @param threadCount The number of threads to allocate to the dispatcher.
+		 * @brief Constructs a BatchDispatcher. Unlike Dispatcher, no threads are started yet --
+		 * threadCount only determines how many are spawned per dispatch() call.
+		 *
+		 * @param threadCount Number of worker threads to spawn per dispatch() call. 0 uses
+		 * defaultWorkerThreadCount. Defaults to std::thread::hardware_concurrency().
 		 */
-		BatchDispatcher(unsigned int threadCount = std::thread::hardware_concurrency()) 
+		BatchDispatcher(unsigned int threadCount = std::thread::hardware_concurrency())
 			: threadCount(threadCount == 0 ? defaultWorkerThreadCount : threadCount) {}
 
 		/**
-		 * @brief Creates and executes a temporary dispatcher with a 1 dimensional space of size count, and a batch size of 1.
-		 * The worker function will be called the flattened start index of its block, and count of how many indices to process.
-		 * 
-		 * @param count The length of the parameter space
-		 * @param worker The worker that the dispatcher will call to process the space
+		 * @brief Constructs a temporary BatchDispatcher and uses it for one dispatch() call over
+		 * a 1-dimensional space of size @p count, with a batch size of 1. Only useful for a
+		 * single one-off dispatch, since the thread pool doesn't outlive this call.
+		 *
+		 * @param count The length of the (1-dimensional) parameter space.
+		 * @param worker See dispatch().
+		 * @throws Same as dispatch().
 		 */
 		static void defaultDispatch(T count, const std::function<void(const Flattener<T>&, T, unsigned int)>& worker) {
 			BatchDispatcher dispatcher;
@@ -59,12 +68,14 @@ namespace thr {
 		}
 
 		/**
-		 * @brief Creates and executes a temporary dispatcher with a 1 dimensional space of size count and a specified batch size.
-		 * The worker function will be called the flattened start index of its block, and count of how many indices to process.
-		 * 
-		 * @param count The length of the parameter space
-		 * @param maxBatch The maximum size of the batch to send to each thread
-		 * @param worker The worker that the dispatcher will call to process the space
+		 * @brief Constructs a temporary BatchDispatcher and uses it for one dispatch() call over
+		 * a 1-dimensional space of size @p count. Only useful for a single one-off dispatch,
+		 * since the thread pool doesn't outlive this call.
+		 *
+		 * @param count The length of the (1-dimensional) parameter space.
+		 * @param maxBatch See dispatch().
+		 * @param worker See dispatch().
+		 * @throws Same as dispatch().
 		 */
 		static void defaultDispatch(T count, unsigned int maxBatch, const std::function<void(const Flattener<T>&, T, unsigned int)>& worker) {
 			BatchDispatcher dispatcher;
@@ -72,12 +83,14 @@ namespace thr {
 		}
 
 		/**
-		 * @brief Creates and executes a temporary dispatcher with a shape specified by the supplied vector of dimensions and a specified batch size.
-		 * The worker function will be called the flattened start index of its block, and count of how many indices to process.
-		 * 
-		 * @param shape The shape of the parameter space expressed in dimensions
-		 * @param maxBatch The maximum size of the batch to send to each thread
-		 * @param worker The worker that the dispatcher will call to process the space
+		 * @brief Constructs a temporary BatchDispatcher and uses it for one dispatch() call over
+		 * the space described by @p shape. Only useful for a single one-off dispatch, since the
+		 * thread pool doesn't outlive this call.
+		 *
+		 * @param shape The shape of the parameter space, outermost dimension first.
+		 * @param maxBatch See dispatch().
+		 * @param worker See dispatch().
+		 * @throws Same as dispatch().
 		 */
 		static void defaultDispatch(const std::vector<unsigned int>& shape, unsigned int maxBatch, const std::function<void(const Flattener<T>&, T, unsigned int)>& worker) {
 			BatchDispatcher dispatcher;
@@ -85,11 +98,14 @@ namespace thr {
 		}
 
 		/**
-		 * @brief Creates and executes a temporary dispatcher with the shape defined in a Flattener object and a specified batch size
-		 * The worker function will be called the flattened start index of its block, and count of how many indices to process.
-		 * 
-		 * @param maxBatch The maximum size of the batch to send to each thread
-		 * @param worker The worker that the dispatcher will call to process the space
+		 * @brief Constructs a temporary BatchDispatcher and uses it for one dispatch() call over
+		 * @p flattener. Only useful for a single one-off dispatch, since the thread pool doesn't
+		 * outlive this call.
+		 *
+		 * @param flattener The shape of the parameter space to cover.
+		 * @param maxBatch See dispatch().
+		 * @param worker See dispatch().
+		 * @throws Same as dispatch().
 		 */
 		static void defaultDispatch(const Flattener<T>& flattener, unsigned int maxBatch, const std::function<void(const Flattener<T>&, T, unsigned int)>& worker) {
 			BatchDispatcher dispatcher;
@@ -97,46 +113,61 @@ namespace thr {
 		}
 
 		/**
-		 * @brief Executes the dispatcher (ie processes a space) with a 1 dimensional space of size count, and a batch size of 1.
-		 * The worker function will be called the flattened start index of its block, and count of how many indices to process.
-		 * 
-		 * @param count The length of the parameter space
-		 * @param worker The worker that the dispatcher will call to process the space
+		 * @brief Equivalent to dispatch(Flattener<T>({count}), maxBatch, worker) -- covers a
+		 * 1-dimensional space of size @p count.
+		 *
+		 * @param count The length of the (1-dimensional) parameter space.
+		 * @param maxBatch See the Flattener<T> overload.
+		 * @param worker See the Flattener<T> overload.
+		 * @throws Same as the Flattener<T> overload.
 		 */
 		void dispatch(T count, unsigned int maxBatch, const std::function<void(const Flattener<T>&, T, unsigned int)>& worker) {
 			dispatch(Flattener<T>({static_cast<unsigned int>(count)}), maxBatch, worker);
 		}
 
 		/**
-		 * @brief Executes the dispatcher (ie processes a space) with a shape specified by the supplied initializer list of dimensions and a specified batch size.
-		 * The worker function will be called the flattened start index of its block, and count of how many indices to process.
-		 * 
-		 * @param shape The shape of the parameter space expressed in dimensions
-		 * @param maxBatch The maximum size of the batch to send to each thread
-		 * @param worker The worker that the dispatcher will call to process the space
+		 * @brief Equivalent to dispatch(Flattener<T>(shape), maxBatch, worker).
+		 *
+		 * @param shape The shape of the parameter space, outermost dimension first.
+		 * @param maxBatch See the Flattener<T> overload.
+		 * @param worker See the Flattener<T> overload.
+		 * @throws Same as the Flattener<T> overload.
 		 */
 		void dispatch(std::initializer_list<unsigned int> shape, unsigned int maxBatch, const std::function<void(const Flattener<T>&, T, unsigned int)>& worker) {
 			dispatch(Flattener<T>(shape), maxBatch, worker);
 		}
 
 		/**
-		 * @brief Executes the dispatcher (ie processes a space) with a shape specified by the supplied vector of dimensions and a specified batch size.
-		 * The worker function will be called the flattened start index of its block, and count of how many indices to process.
-		 * 
-		 * @param shape The shape of the parameter space expressed in dimensions
-		 * @param maxBatch The maximum size of the batch to send to each thread
-		 * @param worker The worker that the dispatcher will call to process the space
+		 * @brief Equivalent to dispatch(Flattener<T>(shape), maxBatch, worker).
+		 *
+		 * @param shape The shape of the parameter space, outermost dimension first.
+		 * @param maxBatch See the Flattener<T> overload.
+		 * @param worker See the Flattener<T> overload.
+		 * @throws Same as the Flattener<T> overload.
 		 */
 		void dispatch(std::vector<unsigned int>& shape, unsigned int maxBatch, const std::function<void(const Flattener<T>&, T, unsigned int)>& worker) {
 			dispatch(Flattener<T>(shape), maxBatch, worker);
 		}
 
 		/**
-		 * @brief Executes the dispatcher (ie processes a space) with the shape defined in a Flattener object and a specified batch size
-		 * The worker function will be called the flattened start index of its block, and count of how many indices to process.
-		 * 
-		 * @param maxBatch The maximum size of the batch to send to each thread
-		 * @param worker The worker that the dispatcher will call to process the space
+		 * @brief Runs @p worker once per contiguous batch of up to @p maxBatch flat indices
+		 * covering @p flattener, spread across a freshly spawned pool of threads, blocking the
+		 * calling thread until every index has been visited.
+		 *
+		 * @param flattener The shape of the parameter space to cover.
+		 * @param maxBatch Maximum number of consecutive flat indices handed to @p worker per
+		 * call. Actual batches may be smaller (e.g. the last one, or when there's less work left
+		 * than threads to spread it across).
+		 * @param worker Called as worker(flattener, start, count) once per batch, where the batch
+		 * covers flat indices [start, start + count). May run on any worker thread, and
+		 * different batches may run concurrently on different threads -- worker must be safe to
+		 * call that way.
+		 *
+		 * @throws std::logic_error if another dispatch() call is already in flight on this
+		 * instance -- concurrently from another thread, or reentrantly from within @p worker
+		 * itself.
+		 * @throws Whatever the first batch to throw an exception threw, once every thread has
+		 * finished. Other batches still run to completion regardless of one throwing.
 		 */
 		void dispatch(const Flattener<T>& flattener, unsigned int maxBatch, const std::function<void(const Flattener<T>&, T, unsigned int)>& worker) {
 			// flattener/maxBatch/worker/allocated are instance members rather than local
@@ -168,15 +199,15 @@ namespace thr {
 		}
 
 		/**
-		 * @brief Returns the size of the thread pool for this Dispatcher
-		 * 
-		 * @return unsigned int The thread count
+		 * @brief Returns the number of worker threads this BatchDispatcher spawns per
+		 * dispatch() call.
+		 *
+		 * @return The worker thread count.
 		 */
 		unsigned int getThreadCount() { return threadCount; }
 
 		/**
-		 * @brief Default thread count when 0 is specified
-		 * 
+		 * @brief Worker thread count used when the constructor is given 0.
 		 */
 		constexpr static unsigned int defaultWorkerThreadCount = 4;
 
