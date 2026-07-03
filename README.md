@@ -3,7 +3,9 @@
 Three interchangeable ways to run a callback over every point in an N-dimensional index space
 (sized and addressed via [`Flattener<>`](https://github.com/lrmoorejr/flattener)), spread across a
 thread pool. They share the same shape: give the dispatcher a shape and a worker function, and it
-calls the worker once per point in that shape, blocking the caller until every point is done.
+covers every point in that shape, blocking the caller until all of them are done -- `Dispatcher`
+and `SlowDispatcher` call the worker once per point; `BatchDispatcher` calls it once per contiguous
+batch of points (see below).
 
 ```cpp
 #include "Dispatcher.hpp"

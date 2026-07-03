@@ -32,6 +32,13 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/flattener)
 add_executable(Dispatcher-test Dispatcher-test.cpp Dispatcher.hpp)
 target_link_libraries(Dispatcher-test PRIVATE Catch2::Catch2WithMain Threads::Threads)
 
+# Separate executable, built with NDEBUG defined, specifically to exercise Dispatcher's
+# behavior when ensure() compiles to a no-op (see Dispatcher-ndebug-test.cpp). Kept out of
+# the main Dispatcher-test binary so that one keeps ensure() active, its normal build.
+add_executable(Dispatcher-ndebug-test Dispatcher-ndebug-test.cpp Dispatcher.hpp)
+target_compile_definitions(Dispatcher-ndebug-test PRIVATE NDEBUG)
+target_link_libraries(Dispatcher-ndebug-test PRIVATE Catch2::Catch2WithMain Threads::Threads)
+
 add_executable(BatchDispatcher-test BatchDispatcher-test.cpp BatchDispatcher.hpp)
 target_link_libraries(BatchDispatcher-test PRIVATE Catch2::Catch2WithMain Threads::Threads)
 
@@ -41,5 +48,6 @@ target_link_libraries(SlowDispatcher-test PRIVATE Catch2::Catch2WithMain Threads
 enable_testing()
 include(Catch)
 catch_discover_tests(Dispatcher-test)
+catch_discover_tests(Dispatcher-ndebug-test)
 catch_discover_tests(BatchDispatcher-test)
 catch_discover_tests(SlowDispatcher-test)
