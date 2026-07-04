@@ -56,12 +56,59 @@ dispatcher.dispatch(1'000'000, /* maxBatch */ 4096, [](const Flattener<>& shape,
 
 ## Queueing
 
-None of the three queue up `dispatch()` calls -- each instance only ever runs one job at a time
-(a second concurrent `dispatch()` call on the same instance is a usage error, checked via
-`ensure()` in `Dispatcher`). If you need to queue dispatch work -- e.g. producer threads that
-submit jobs faster than a pool can drain them -- put a
+None of the three queue up `dispatch()` calls -- each instance only ever runs one job at a time.
+For `Dispatcher` and `BatchDispatcher`, a second concurrent (or reentrant, e.g. calling `dispatch()`
+again from inside a worker callback) `dispatch()` call on the same instance is a usage error and
+throws `std::logic_error` rather than queueing or corrupting state. `SlowDispatcher` is the
+exception -- concurrent `dispatch()` calls on the same instance are fine there, since each call
+only ever touches its own local parameters, not shared state. If you need to queue up dispatch
+work -- e.g. producer threads submitting jobs faster than a pool can drain them -- put a
 [`thr::Queue`](https://github.com/lrmoorejr/queue) in front instead of expecting the dispatcher to
 buffer it for you.
+
+## Stopping early
+
+`Dispatcher` and `SlowDispatcher` support cutting a `dispatch()` call short via `terminate()`,
+callable from any thread (including from within the worker callback itself, to let a job decide
+when it's done):
+
+```cpp
+thr::Dispatcher dispatcher;
+std::thread stopper([&]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    dispatcher.terminate(); // any dispatch() call in flight unwinds safely
+});
+dispatcher.dispatch(1'000'000'000, worker); // returns early once terminate() is called
+stopper.join();
+```
+
+Once `terminate()` has run, the instance is done -- a later `dispatch()` call throws
+`std::logic_error` instead of running. `~Dispatcher()`/`~SlowDispatcher()` call `terminate()`
+automatically. `BatchDispatcher` has no `terminate()` and needs none: it never keeps a thread pool
+running past a `dispatch()` call returning, so there's nothing to cut short or clean up between
+calls.
+
+**Destroying a `Dispatcher` while another thread might still call `dispatch()` on it for the
+first time is undefined behavior** -- the same contract as destroying a `std::mutex` someone's
+about to lock. `terminate()` can only safely wait for a `dispatch()` call it already knows is in
+flight; join any thread that might call `dispatch()` before destroying (or letting go out of
+scope) the `Dispatcher` it's calling into. `SlowDispatcher` and `BatchDispatcher` don't have this
+restriction, since neither one has a background thread that could still be mid-call when the
+object is destroyed.
+
+## Errors
+
+All three throw `std::logic_error` for caller misuse (concurrent/reentrant `dispatch()` where
+unsupported, or `dispatch()` after `terminate()`), and propagate whatever the worker callback
+itself throws back out of `dispatch()`. For `Dispatcher`/`BatchDispatcher` that happens once every
+already-started unit of work finishes -- other units keep running to completion regardless of one
+of them throwing, since they're spread across threads. `SlowDispatcher` runs synchronously on the
+caller's own thread, so a thrown exception stops the loop immediately instead, exactly like an
+ordinary function call -- indices after the one that threw never run.
+`BatchDispatcher::dispatch()` additionally throws `std::invalid_argument` if `maxBatch` is 0, and
+`std::overflow_error` if a `count` passed to the 1-dimensional convenience overload doesn't fit in
+an `unsigned int` (a single `Flattener<T>` dimension is always sized as one; for a larger space,
+use the `Flattener<T>` overload with multiple dimensions instead).
 
 ## Requirements
 
@@ -73,8 +120,9 @@ buffer it for you.
   vendored here as a git submodule (`flattener/`); clone with `--recurse-submodules` or run
   `git submodule update --init` after cloning
 - Optional (`Dispatcher` only): [`Ensure.hpp`](https://github.com/lrmoorejr/ensure) for a
-  formatted diagnostic when `dispatch()` is called concurrently on the same instance; falls back
-  to plain `assert()` if not present
+  formatted diagnostic if an internal invariant is ever violated; falls back to plain `assert()`
+  if not present. Not involved in any of the `std::logic_error`s under [Errors](#errors) above --
+  those are always active regardless of `NDEBUG`, with or without `Ensure.hpp` on the include path.
 
 ## License
 
