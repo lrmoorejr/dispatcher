@@ -154,30 +154,33 @@ TEST_CASE( "Reused dispatch" ) {
 }
 
 TEST_CASE( "Shape completedness test" ) {
+	// Catch2's assertion macros aren't thread-safe, so any REQUIRE/CHECK must run on the
+	// calling thread only -- never inside a worker callback that BatchDispatcher may invoke
+	// concurrently from multiple threads (this used to REQUIRE() in here directly, which
+	// intermittently crashed in CI with a Catch2-internal "OutputRedirect" assertion once
+	// two threads happened to hit an assertion macro at the same time). Aggregate into a
+	// thread-safe flag instead, and assert on it after dispatch() returns.
 	BatchDispatcher<>* dispatch = new BatchDispatcher(8);
 	CHECK(8 == dispatch->getThreadCount());
 	bool ran[2][5][10][100][10] = {false};
-	dispatch->dispatch({2, 5, 10, 100, 10}, 11, [&ran](const Flattener<>& flattener, size_t flatIndex, unsigned int batch){
+	std::atomic<bool> outOfRange = {false};
+	dispatch->dispatch({2, 5, 10, 100, 10}, 11, [&ran, &outOfRange](const Flattener<>& flattener, size_t flatIndex, unsigned int batch){
 		for(unsigned int index = 0; index < batch; ++index) {
 			int a = flattener.index(0, flatIndex + index);
-			REQUIRE(a >= 0);
-			REQUIRE(a < 2);
 			int b = flattener.index(1, flatIndex + index);
-			REQUIRE(b>= 0);
-			REQUIRE(b< 5);
 			int c = flattener.index(2, flatIndex + index);
-			REQUIRE(c >= 0);
-			REQUIRE(c < 10);
 			int d = flattener.index(3, flatIndex + index);
-			REQUIRE(d >= 0);
-			REQUIRE(d < 100);
 			int e = flattener.index(4, flatIndex + index);
-			REQUIRE(e >= 0);
-			REQUIRE(e < 10);
+			if(a < 0 || a >= 2 || b < 0 || b >= 5 || c < 0 || c >= 10 || d < 0 || d >= 100 || e < 0 || e >= 10) {
+				outOfRange = true;
+				continue;
+			}
 			ran[a][b][c][d][e] = true;
 		}
 	});
 	delete dispatch;
+
+	REQUIRE_FALSE(outOfRange);
 
 	for(int e = 0; e < 10; ++e) {
 		for(int d = 0; d < 100; ++d) {
@@ -202,12 +205,18 @@ TEST_CASE( "Default dispatch, 300 count" ) {
 }
 
 TEST_CASE( "Unbashed default dispatch, 300 count" ) {
+	// Catch2's assertion macros aren't thread-safe -- CHECK() must not run inside a worker
+	// callback that may be invoked concurrently from multiple threads. Aggregate into a
+	// thread-safe flag instead, and assert on it after dispatch() returns.
 	std::atomic<int> count(0);
-	BatchDispatcher<>::defaultDispatch(300, [&count](const Flattener<>& flattener, size_t flatIndex, unsigned int batch){
-		CHECK(batch == 1);
+	std::atomic<bool> batchWasNotOne = {false};
+	BatchDispatcher<>::defaultDispatch(300, [&count, &batchWasNotOne](const Flattener<>& flattener, size_t flatIndex, unsigned int batch){
+		if(batch != 1)
+			batchWasNotOne = true;
 		count += 1;
 	});
 
+	CHECK_FALSE(batchWasNotOne);
 	CHECK(300 == count);
 }
 

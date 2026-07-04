@@ -131,28 +131,31 @@ TEST_CASE( "Weird shape (100000 total), 8 threads" ) {
 }
 
 TEST_CASE( "Shape completedness test" ) {
+	// Catch2's assertion macros aren't thread-safe, so any REQUIRE/CHECK must run on the
+	// calling thread only -- never inside a worker callback that Dispatcher may invoke
+	// concurrently from multiple threads (this used to REQUIRE() in here directly, which
+	// intermittently crashed in CI with a Catch2-internal "OutputRedirect" assertion once
+	// two threads happened to hit an assertion macro at the same time). Aggregate into a
+	// thread-safe flag instead, and assert on it after dispatch() returns.
 	Dispatcher* dispatch = new Dispatcher(8);
 	CHECK(8 == dispatch->getThreadCount());
 	bool ran[2][5][10][100][10] = {false};
-	dispatch->dispatch({2, 5, 10, 100, 10}, [&ran](Flattener<>& flattener, size_t flatIndex){
+	std::atomic<bool> outOfRange = {false};
+	dispatch->dispatch({2, 5, 10, 100, 10}, [&ran, &outOfRange](Flattener<>& flattener, size_t flatIndex){
 		int a = flattener.index(0, flatIndex);
-		REQUIRE(a >= 0);
-		REQUIRE(a < 2);
 		int b = flattener.index(1, flatIndex);
-		REQUIRE(b>= 0);
-		REQUIRE(b< 5);
 		int c = flattener.index(2, flatIndex);
-		REQUIRE(c >= 0);
-		REQUIRE(c < 10);
 		int d = flattener.index(3, flatIndex);
-		REQUIRE(d >= 0);
-		REQUIRE(d < 100);
 		int e = flattener.index(4, flatIndex);
-		REQUIRE(e >= 0);
-		REQUIRE(e < 10);
+		if(a < 0 || a >= 2 || b < 0 || b >= 5 || c < 0 || c >= 10 || d < 0 || d >= 100 || e < 0 || e >= 10) {
+			outOfRange = true;
+			return;
+		}
 		ran[a][b][c][d][e] = true;
 	});
 	delete dispatch;
+
+	REQUIRE_FALSE(outOfRange);
 
 	for(int e = 0; e < 10; ++e) {
 		for(int d = 0; d < 100; ++d) {
