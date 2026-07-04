@@ -17,6 +17,8 @@
  */
 
 #include <atomic>
+#include <functional>
+#include <stdexcept>
 #include "Flattener.hpp"
 
 namespace thr {
@@ -28,11 +30,11 @@ namespace thr {
 	 *
 	 * Because dispatch() never leaves the calling thread, several of Dispatcher's usage
 	 * restrictions don't apply here: concurrent dispatch() calls from different threads on the
-	 * same instance are fine (each uses its own local Job, not shared state), calling
-	 * terminate() from within dispatch()'s own callback is an ordinary same-thread early exit
-	 * rather than a self-join hazard, and an exception thrown by the callback propagates
-	 * normally to dispatch()'s caller rather than needing to be caught and rethrown across a
-	 * thread boundary.
+	 * same instance are fine (each call only ever touches its own local parameters, not shared
+	 * state), calling terminate() from within dispatch()'s own callback is an ordinary
+	 * same-thread early exit rather than a self-join hazard, and an exception thrown by the
+	 * callback propagates normally to dispatch()'s caller rather than needing to be caught and
+	 * rethrown across a thread boundary.
 	 */
 	class SlowDispatcher {
 	public:
@@ -151,16 +153,17 @@ namespace thr {
 		 * calling thread. Safe to call terminate() on this SlowDispatcher from within worker
 		 * itself, to stop the loop early.
 		 *
+		 * @throws std::logic_error if this SlowDispatcher has already been terminated (see
+		 * terminate()), matching Dispatcher's contract for the same situation.
 		 * @throws Whatever worker throws, from whichever index throws it -- propagates
 		 * immediately, exactly like an ordinary function call, since there's no worker thread
 		 * boundary to cross.
 		 */
 		void dispatch(Flattener<> dimensions, const std::function<void(Flattener<>&, size_t)>& worker) {
-			// Construct a new job
-			Job job(dimensions, worker);
+			throw_if<std::logic_error>(terminateAll, "dispatch() called on a terminated SlowDispatcher");
 
-			for(size_t flatIndex = 0; flatIndex < job.dimensions.size() && !terminateAll; ++flatIndex) {
-				job.workFunction(job.dimensions, flatIndex);
+			for(size_t flatIndex = 0; flatIndex < dimensions.size() && !terminateAll; ++flatIndex) {
+				worker(dimensions, flatIndex);
 			}
 		}
 
@@ -169,22 +172,13 @@ namespace thr {
 		 */
 		unsigned int getThreadCount() { return threadCount; }
 
+		/**
+		 * @brief Present for API parity with Dispatcher/BatchDispatcher. Has no effect on
+		 * SlowDispatcher, which never spawns a thread regardless of the constructor argument.
+		 */
+		constexpr static unsigned int defaultWorkerThreadCount = 4;
+
 	private:
-		class Job {
-		private:
-			Job(Flattener<> dimensions, const std::function<void(Flattener<>&, size_t)>& workFunction) : dimensions(dimensions), workFunction(workFunction) {}
-			inline bool depleted() const { return allocated >= dimensions.size(); }
-			inline bool complete() const  { return completed >= dimensions.size(); }
-
-			Flattener<> dimensions;
-			const std::function<void(Flattener<>&, size_t)> workFunction;
-
-			size_t allocated = 0;	// How many work units have been allocated to threads, protected by Dispatch::jobQueueMutex
-			size_t completed = 0;	// How many work units were completed, protected by Job::mutex
-
-			friend class SlowDispatcher;
-		};
-
 		const unsigned int threadCount = 1;
 		// Atomic because terminate() can legitimately be called from a different thread
 		// than the one currently inside dispatch()'s loop (see "Overlapping jobs" and

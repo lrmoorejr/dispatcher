@@ -201,10 +201,15 @@ TEST_CASE("SlowDispatcher Fast early termination" ) {
 
 	std::atomic<int> count1(0);
 	std::thread thread1([dispatch, &count1]() {
-		dispatch->dispatch({2, 5, 100, 10}, [&count1](Flattener<>& flattener, size_t flatIndex){
-			std::this_thread::sleep_for (std::chrono::milliseconds(10));
-			count1++;
-		});
+		try {
+			dispatch->dispatch({2, 5, 100, 10}, [&count1](Flattener<>& flattener, size_t flatIndex){
+				std::this_thread::sleep_for (std::chrono::milliseconds(10));
+				count1++;
+			});
+		} catch(const std::logic_error&) {
+			// terminate() won the race before this call even started -- dispatch() now
+			// throws instead of silently doing no work, matching Dispatcher's contract.
+		}
 	});
 
 	// Terminate early
@@ -286,4 +291,26 @@ TEST_CASE("SlowDispatcher worker callback exceptions propagate normally, no thre
 	// Single-threaded and synchronous: the loop stops dead at the throw, unlike the
 	// parallel dispatchers where other already-running units still finish regardless.
 	CHECK(6 == count);
+}
+
+TEST_CASE("SlowDispatcher dispatch() after terminate() throws instead of silently doing no work") {
+	// Matches Dispatcher's contract for the same situation, rather than the loop condition
+	// just silently evaluating false on the first iteration and returning normally.
+	SlowDispatcher dispatch;
+	dispatch.terminate();
+
+	std::atomic<int> count(0);
+	CHECK_THROWS_AS(dispatch.dispatch(10, [&count](Flattener<>& flattener, size_t flatIndex){
+		count++;
+	}), std::logic_error);
+
+	CHECK(0 == count);
+}
+
+TEST_CASE("SlowDispatcher exposes defaultWorkerThreadCount for API parity with Dispatcher/BatchDispatcher") {
+	// Has no actual effect on SlowDispatcher (which always reports a thread count of 1
+	// regardless), but its absence would break generic code written against all three
+	// dispatcher classes, or any call site referencing it directly the way Dispatcher-test.cpp
+	// and BatchDispatcher-test.cpp both do for their own classes.
+	CHECK(4 == SlowDispatcher::defaultWorkerThreadCount);
 }
