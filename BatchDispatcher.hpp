@@ -22,6 +22,8 @@
 #include <atomic>
 #include <exception>
 #include <stdexcept>
+#include <limits>
+#include <mutex>
 #include "Flattener.hpp"
 
 namespace thr {
@@ -116,12 +118,18 @@ namespace thr {
 		 * @brief Equivalent to dispatch(Flattener<T>({count}), maxBatch, worker) -- covers a
 		 * 1-dimensional space of size @p count.
 		 *
-		 * @param count The length of the (1-dimensional) parameter space.
+		 * @param count The length of the (1-dimensional) parameter space. Must fit in an
+		 * unsigned int, since a single Flattener<T> dimension is always sized as one -- for a
+		 * count wider than that, split it across multiple dimensions and use the Flattener<T>
+		 * overload directly.
 		 * @param maxBatch See the Flattener<T> overload.
 		 * @param worker See the Flattener<T> overload.
+		 * @throws std::overflow_error if @p count doesn't fit in an unsigned int.
 		 * @throws Same as the Flattener<T> overload.
 		 */
 		void dispatch(T count, unsigned int maxBatch, const std::function<void(const Flattener<T>&, T, unsigned int)>& worker) {
+			throw_if<std::overflow_error>(count > static_cast<T>(std::numeric_limits<unsigned int>::max()),
+				"BatchDispatcher: count does not fit in an unsigned int, which a single Flattener<T> dimension requires -- split it across multiple dimensions and use the Flattener<T> overload instead");
 			dispatch(Flattener<T>({static_cast<unsigned int>(count)}), maxBatch, worker);
 		}
 
@@ -163,6 +171,8 @@ namespace thr {
 		 * different batches may run concurrently on different threads -- worker must be safe to
 		 * call that way.
 		 *
+		 * @throws std::invalid_argument if @p maxBatch is 0 (a zero-sized batch can never
+		 * advance, which would otherwise hang every worker thread, and this call, forever).
 		 * @throws std::logic_error if another dispatch() call is already in flight on this
 		 * instance -- concurrently from another thread, or reentrantly from within @p worker
 		 * itself.
@@ -170,6 +180,8 @@ namespace thr {
 		 * finished. Other batches still run to completion regardless of one throwing.
 		 */
 		void dispatch(const Flattener<T>& flattener, unsigned int maxBatch, const std::function<void(const Flattener<T>&, T, unsigned int)>& worker) {
+			throw_if<std::invalid_argument>(maxBatch == 0, "BatchDispatcher: maxBatch must be greater than 0");
+
 			// flattener/maxBatch/worker/allocated are instance members rather than local
 			// state (unlike Dispatcher's Job), so a second concurrent or reentrant call on
 			// this same instance would otherwise race on them -- reject it immediately,
@@ -178,24 +190,39 @@ namespace thr {
 
 			this->flattener = &flattener;
 			this->maxBatch = maxBatch;
-			this->worker = worker;
+			this->worker = &worker;
 			allocated = 0;
 			caughtException = nullptr;
 
-			for(size_t threadIndex = 0; threadIndex < threadCount; ++threadIndex)
+			// Don't spawn more threads than there's work to hand out -- avoids paying full OS
+			// thread create/join cost for threads that would immediately find nothing to do.
+			const T totalWork = flattener.size();
+			unsigned int threadsToSpawn = 0;
+			if(totalWork > 0) {
+				const T batchesNeeded = (totalWork - 1) / maxBatch + 1; // ceil(totalWork / maxBatch), overflow-safe
+				threadsToSpawn = batchesNeeded < static_cast<T>(threadCount) ? static_cast<unsigned int>(batchesNeeded) : threadCount;
+			}
+			activeWorkers = threadsToSpawn;
+
+			for(size_t threadIndex = 0; threadIndex < threadsToSpawn; ++threadIndex)
 				threads.emplace_back(&BatchDispatcher::workerThread, this);
 			for(std::thread& workerThread : threads)
 				workerThread.join();
 			threads.clear();
 
+			// Capture this while still guarded by inProgress before releasing it -- once
+			// inProgress is false, a new dispatch() call on another thread can start and
+			// immediately reset caughtException (its own setup, above), racing with a read
+			// here if the read happened after the reset instead of before it.
+			std::exception_ptr thrown = caughtException;
 			inProgress = false;
 
 			// Surface the first exception thrown by any work unit to the caller of
 			// dispatch(), rather than letting it escape the worker thread that hit it
 			// (which would otherwise call std::terminate() and abort the whole process --
 			// see workerThread()). Other work units still run to completion regardless.
-			if(caughtException)
-				std::rethrow_exception(caughtException);
+			if(thrown)
+				std::rethrow_exception(thrown);
 		}
 
 		/**
@@ -220,13 +247,23 @@ namespace thr {
 				{
 					std::lock_guard<std::mutex> guard(mutex);
 					const T todo = flattener->size() - allocated;
-					if(todo == 0)
+					if(todo == 0) {
+						--activeWorkers;
 						return;
+					}
 
 					start = allocated;
 					batchSize = maxBatch;
-					if(todo < maxBatch)
-						batchSize = std::max<unsigned int>(1, static_cast<unsigned int>(todo / threadCount));
+					if(todo < maxBatch) {
+						// Divide by however many workers are still actually contending for
+						// work, not the originally-configured thread count -- otherwise, as
+						// threads finish early, the remaining ones keep dividing by the
+						// larger original count and degrade toward single-unit batches (one
+						// mutex round trip per unit) well before the space is actually
+						// exhausted.
+						unsigned int remainingWorkers = std::max<unsigned int>(1, activeWorkers.load());
+						batchSize = std::max<unsigned int>(1, static_cast<unsigned int>(todo / remainingWorkers));
+					}
 					allocated += batchSize;
 				}
 
@@ -235,7 +272,7 @@ namespace thr {
 				// std::terminate() and abort the whole process. dispatch() rethrows the
 				// first one it sees to its caller once every thread has finished instead.
 				try {
-					worker(*flattener, start, batchSize);
+					(*worker)(*flattener, start, batchSize);
 				} catch(...) {
 					std::lock_guard<std::mutex> guard(mutex);
 					if(!caughtException)
@@ -249,14 +286,25 @@ namespace thr {
 		std::vector<std::thread> threads;
 		std::mutex mutex;
 		const Flattener<T>* flattener = nullptr;
-		unsigned int maxBatch;
-		std::function<void(const Flattener<T>&, T, unsigned int)> worker;
+		unsigned int maxBatch = 0;
+
+		// Points at the caller's std::function for the duration of the (synchronous,
+		// blocking) dispatch() call rather than copying it -- the argument is guaranteed to
+		// outlive the call, and worker's captures may be large enough to otherwise cost a
+		// heap allocation per dispatch() call for no benefit.
+		const std::function<void(const Flattener<T>&, T, unsigned int)>* worker = nullptr;
 
 		T allocated = 0;
 
 		// Guards against a second dispatch() call (concurrent or reentrant) running on
 		// this instance while one is already in flight -- see dispatch().
 		std::atomic<bool> inProgress = {false};
+
+		// How many worker threads for the current dispatch() call haven't yet found the
+		// space exhausted. Set to the number of threads actually spawned at the start of
+		// dispatch(), decremented by each thread as it exits -- see workerThread()'s tail
+		// batch-size calculation.
+		std::atomic<unsigned int> activeWorkers = {0};
 
 		// The first exception thrown by any work unit in the current dispatch() call, if
 		// any; protected by mutex. Later ones are discarded -- work units still run to

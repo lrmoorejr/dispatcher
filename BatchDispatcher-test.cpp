@@ -16,6 +16,7 @@
 
 #include <future>
 #include <stdexcept>
+#include <limits>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "BatchDispatcher.hpp"
@@ -269,4 +270,95 @@ TEST_CASE( "Reentrant dispatch() from within a worker callback throws instead of
 	});
 
 	CHECK(innerThrew);
+}
+
+TEST_CASE( "maxBatch of 0 throws instead of hanging forever" ) {
+	// batchSize starts as maxBatch and the tail-shrinking branch (todo < maxBatch) can never
+	// trigger when maxBatch is 0, so allocated would never advance and every worker thread
+	// would spin forever -- reject it upfront instead.
+	BatchDispatcher<> dispatch(2);
+
+	CHECK_THROWS_AS(dispatch.dispatch(10, 0, [](const Flattener<>& flattener, size_t start, unsigned int batch){}),
+		std::invalid_argument);
+}
+
+TEST_CASE( "A count wider than unsigned int throws instead of silently truncating" ) {
+	// The dispatch(T count, ...) overload builds a single-dimension Flattener<T>, whose
+	// dimension size is always an unsigned int regardless of T -- static_cast<unsigned
+	// int>(count) would otherwise silently wrap for a count that doesn't fit, iterating a
+	// space far smaller than requested with no error. This applies even to the default
+	// BatchDispatcher<> (T = size_t) on any 64-bit platform, not just an unusual custom T.
+	BatchDispatcher<> dispatch(2);
+	size_t tooLarge = static_cast<size_t>(std::numeric_limits<unsigned int>::max()) + 1;
+
+	CHECK_THROWS_AS(dispatch.dispatch(tooLarge, 10, [](const Flattener<>& flattener, size_t start, unsigned int batch){}),
+		std::overflow_error);
+}
+
+TEST_CASE( "Small dispatch (fewer units than threads) still processes every unit exactly once" ) {
+	// Regression coverage for clamping the spawned thread count to the available work --
+	// confirms the optimization didn't change correctness for a space much smaller than
+	// threadCount.
+	BatchDispatcher<> dispatch(16);
+	std::atomic<int> count(0);
+
+	dispatch.dispatch(3, 5, [&count](const Flattener<>& flattener, size_t start, unsigned int batch){
+		count += batch;
+	});
+
+	CHECK(3 == count);
+}
+
+TEST_CASE( "Uneven tail with many threads still processes every unit exactly once" ) {
+	// Regression coverage for the tail batch-size heuristic now dividing by the number of
+	// still-active workers rather than the fixed configured thread count.
+	BatchDispatcher<> dispatch(8);
+	std::atomic<size_t> count(0);
+
+	dispatch.dispatch(1'000'003, 4096, [&count](const Flattener<>& flattener, size_t start, unsigned int batch){
+		count += batch;
+	});
+
+	CHECK(1'000'003 == count);
+}
+
+TEST_CASE( "Repeated concurrent dispatch() calls, some throwing, never lose an exception" ) {
+	// Regression coverage for a fixed bug: inProgress used to be reset to false (unblocking
+	// a new dispatch() call) before caughtException was read for the rethrow, so a freshly
+	// started call could wipe caughtException (its own setup resets it to nullptr) before
+	// the finishing call read it -- silently swallowing a real exception. caughtException is
+	// now captured into a local before inProgress is released. This loop won't reliably catch
+	// a regression without an artificially widened window (confirmed empirically during the
+	// fix: 429 lost exceptions in 3 seconds with the window widened) -- it exists to give the
+	// race a chance under -fsanitize=thread, not as a reliable assertion on its own.
+	std::atomic<bool> stop = {false};
+	std::atomic<int> missedExceptions = {0};
+	BatchDispatcher<> dispatch(4);
+
+	auto hammer = [&](bool shouldThrow) {
+		while(!stop.load()) {
+			try {
+				dispatch.dispatch(40, 5, [&](const Flattener<>& flattener, size_t start, unsigned int batch){
+					if(shouldThrow && start == 0)
+						throw std::runtime_error("expected");
+				});
+				if(shouldThrow)
+					missedExceptions++;
+			} catch(const std::runtime_error&) {
+				// expected
+			} catch(const std::logic_error&) {
+				// expected: a concurrent call was rejected instead of running at all
+			}
+		}
+	};
+
+	std::thread thread1(hammer, true);
+	std::thread thread2(hammer, false);
+
+	std::this_thread::sleep_for(std::chrono::milliseconds(500));
+	stop = true;
+	thread1.join();
+	thread2.join();
+
+	CHECK(0 == missedExceptions);
 }
