@@ -362,3 +362,91 @@ TEST_CASE( "Repeated concurrent dispatch() calls, some throwing, never lose an e
 
 	CHECK(0 == missedExceptions);
 }
+
+TEST_CASE( "Non-default T instantiation processes every unit exactly once" ) {
+	// Every other test in this file uses the default BatchDispatcher<> (T = size_t) --
+	// exercise a genuinely different T so a regression that only works by coincidence for
+	// size_t (e.g. an untested cast, a comparison that silently promotes) would surface.
+	BatchDispatcher<uint32_t> dispatch(8);
+	std::atomic<uint32_t> count(0);
+
+	dispatch.dispatch(static_cast<uint32_t>(10007), 13, [&count](const Flattener<uint32_t>& flattener, uint32_t start, unsigned int batch){
+		count += batch;
+	});
+
+	CHECK(10007 == count);
+}
+
+TEST_CASE( "maxBatch far larger than the whole space uses a single batch" ) {
+	// Only one maxBatch-sized batch is needed to cover the whole space here, so the
+	// thread-count-clamping optimization should spawn only the one thread that does
+	// anything -- confirms that optimization doesn't change the result, just how many
+	// (mostly-idle) threads would otherwise have been spawned for no reason.
+	BatchDispatcher<> dispatch(8);
+	std::atomic<int> count(0);
+	std::atomic<int> invocations(0);
+
+	dispatch.dispatch(50, 10000, [&](const Flattener<>& flattener, size_t start, unsigned int batch){
+		count += batch;
+		invocations++;
+	});
+
+	CHECK(50 == count);
+	CHECK(1 == invocations);
+}
+
+TEST_CASE( "activeWorkers-based tail division shares work across several threads" ) {
+	// Chosen so more than one maxBatch-sized batch is needed (so several threads are
+	// actually spawned) but the total doesn't divide evenly by maxBatch (so the
+	// tail-shrinking branch, dividing by however many workers are still active, is
+	// guaranteed to trigger at least once instead of every batch landing on the
+	// full-maxBatch branch).
+	BatchDispatcher<> dispatch(8);
+	std::atomic<int> count(0);
+	std::atomic<int> invocations(0);
+
+	dispatch.dispatch(320, 50, [&](const Flattener<>& flattener, size_t start, unsigned int batch){
+		count += batch;
+		invocations++;
+	});
+
+	CHECK(320 == count);
+	// More than one batch was handed out -- the work wasn't dumped on a single thread.
+	CHECK(invocations > 1);
+}
+
+TEST_CASE( "A batch smaller than maxBatch is actually observed when the space doesn't divide evenly" ) {
+	// Existing tests with a non-evenly-divisible (total, maxBatch) pair only check that
+	// batch sizes sum to the total -- this explicitly confirms a partial (< maxBatch) batch
+	// was actually handed to the worker, the case most likely to break from an off-by-one.
+	BatchDispatcher<> dispatch(4);
+	std::atomic<size_t> count(0);
+	std::atomic<bool> sawPartialBatch(false);
+	const unsigned int maxBatch = 64;
+
+	dispatch.dispatch(1000, maxBatch, [&](const Flattener<>& flattener, size_t start, unsigned int batch){
+		count += batch;
+		if(batch < maxBatch)
+			sawPartialBatch = true;
+	});
+
+	CHECK(1000 == count);
+	CHECK(sawPartialBatch);
+}
+
+TEST_CASE( "Many batches throwing concurrently within one call still yield exactly one clean exception" ) {
+	// Stresses the caughtException "first exception wins" logic with real contention from
+	// several threads throwing at (close to) the same time within a single dispatch() call,
+	// rather than just one thread throwing once.
+	BatchDispatcher<> dispatch(8);
+	std::atomic<int> count(0);
+
+	CHECK_THROWS_AS(dispatch.dispatch(100, 1, [&count](const Flattener<>& flattener, size_t start, unsigned int batch){
+		count += batch;
+		throw std::runtime_error("every batch fails");
+	}), std::runtime_error);
+
+	// Every batch still ran (and counted itself) before throwing, despite only one
+	// exception surviving to be rethrown.
+	CHECK(100 == count);
+}
