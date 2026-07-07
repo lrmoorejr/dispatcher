@@ -40,13 +40,13 @@ TEST_CASE( "Unknown thread count" ) {
 	Dispatcher* dispatch = new Dispatcher(0);
 	auto threadCount = dispatch->getThreadCount();
 	delete dispatch;
-	CHECK(Dispatcher::defaultWorkerThreadCount);
+	CHECK(threadCount == Dispatcher::defaultWorkerThreadCount);
 }
 
 TEST_CASE( "Simple dispatch" ) {
 	Dispatcher* dispatch = new Dispatcher(1);
 	CHECK(1 == dispatch->getThreadCount());
-	dispatch->dispatch(1, [](Flattener<size_t>& flattener, size_t flatIndex){printf("Simple dispatch called\n");});
+	dispatch->dispatch(1, [](Flattener<size_t>&, size_t){printf("Simple dispatch called\n");});
 	delete dispatch;
 }
 
@@ -54,7 +54,7 @@ TEST_CASE( "Simple dispatch, 3 count" ) {
 	Dispatcher* dispatch = new Dispatcher(1);
 	CHECK(1 == dispatch->getThreadCount());
 	std::atomic<int> count(0);
-	dispatch->dispatch(3, [&count](Flattener<>& flattener, size_t flatIndex){
+	dispatch->dispatch(3, [&count](Flattener<>&, size_t){
 		count++;
 	});
 	delete dispatch;
@@ -66,7 +66,7 @@ TEST_CASE( "Simple dispatch, 0 count" ) {
 	Dispatcher* dispatch = new Dispatcher(1);
 	CHECK(1 == dispatch->getThreadCount());
 	std::atomic<int> count(0);
-	CHECK_THROWS(dispatch->dispatch(0, [&count](Flattener<>& flattener, size_t flatIndex){ count++;}));
+	CHECK_THROWS(dispatch->dispatch(0, [&count](Flattener<>&, size_t){ count++;}));
 	delete dispatch;
 
 	CHECK(0 == count);
@@ -76,7 +76,7 @@ TEST_CASE( "Simple dispatch, 0 on one dimension" ) {
 	Dispatcher* dispatch = new Dispatcher(1);
 	CHECK(1 == dispatch->getThreadCount());
 	std::atomic<int> count(0);
-	CHECK_THROWS(dispatch->dispatch({3,4,0,3,4}, [&count](Flattener<>& flattener, size_t flatIndex){ count++;}));
+	CHECK_THROWS(dispatch->dispatch({3,4,0,3,4}, [&count](Flattener<>&, size_t){ count++;}));
 	delete dispatch;
 
 	CHECK(0 == count);
@@ -86,7 +86,7 @@ TEST_CASE( "Simple dispatch, 4 threads, 4 count" ) {
 	Dispatcher* dispatch = new Dispatcher(4);
 	CHECK(4 == dispatch->getThreadCount());
 	std::atomic<int> count(0);
-	dispatch->dispatch(4, [&count](Flattener<>& flattener, size_t flatIndex){
+	dispatch->dispatch(4, [&count](Flattener<>&, size_t){
 		count++;
 	});
 	delete dispatch;
@@ -98,7 +98,7 @@ TEST_CASE( "Simple dispatch, 2 threads, 100 count" ) {
 	Dispatcher* dispatch = new Dispatcher(2);
 	CHECK(2 == dispatch->getThreadCount());
 	std::atomic<int> count(0);
-	dispatch->dispatch(100, [&count](Flattener<>& flattener, size_t flatIndex){
+	dispatch->dispatch(100, [&count](Flattener<>&, size_t){
 		count++;
 	});
 	delete dispatch;
@@ -110,7 +110,7 @@ TEST_CASE( "Simple dispatch, 100 threads, 2 count" ) {
 	Dispatcher* dispatch = new Dispatcher(100);
 	CHECK(100 == dispatch->getThreadCount());
 	std::atomic<int> count(0);
-	dispatch->dispatch(2, [&count](Flattener<>& flattener, size_t flatIndex){
+	dispatch->dispatch(2, [&count](Flattener<>&, size_t){
 		count++;
 	});
 	delete dispatch;
@@ -122,7 +122,7 @@ TEST_CASE( "Weird shape (100000 total), 8 threads" ) {
 	Dispatcher* dispatch = new Dispatcher(8);
 	CHECK(8 == dispatch->getThreadCount());
 	std::atomic<int> count(0);
-	dispatch->dispatch({2, 5, 10, 100, 10}, [&count](Flattener<>& flattener, size_t flatIndex){
+	dispatch->dispatch({2, 5, 10, 100, 10}, [&count](Flattener<>&, size_t){
 		count++;
 	});
 	delete dispatch;
@@ -139,7 +139,7 @@ TEST_CASE( "Shape completedness test" ) {
 	// thread-safe flag instead, and assert on it after dispatch() returns.
 	Dispatcher* dispatch = new Dispatcher(8);
 	CHECK(8 == dispatch->getThreadCount());
-	bool ran[2][5][10][100][10] = {false};
+	bool ran[2][5][10][100][10] = {};
 	std::atomic<bool> outOfRange = {false};
 	dispatch->dispatch({2, 5, 10, 100, 10}, [&ran, &outOfRange](Flattener<>& flattener, size_t flatIndex){
 		int a = flattener.index(0, flatIndex);
@@ -176,7 +176,7 @@ TEST_CASE( "Fast early termination" ) {
 	std::atomic<int> count1(0);
 	std::thread thread1([dispatch, &count1]() {
 		try {
-			dispatch->dispatch({2, 5, 100, 10}, [&count1](Flattener<>& flattener, size_t flatIndex){
+			dispatch->dispatch({2, 5, 100, 10}, [&count1](Flattener<>&, size_t){
 				std::this_thread::sleep_for (std::chrono::milliseconds(10));
 				count1++;
 			});
@@ -203,7 +203,7 @@ TEST_CASE( "Early termination half way through" ) {
 
 	std::atomic<int> count1(0);
 	std::thread thread1([dispatch, &count1]() {
-		dispatch->dispatch({2, 5, 100, 10}, [&count1](Flattener<>& flattener, size_t flatIndex){
+		dispatch->dispatch({2, 5, 100, 10}, [&count1](Flattener<>&, size_t){
 			std::this_thread::sleep_for (std::chrono::milliseconds(10));
 			count1++;
 		});
@@ -235,7 +235,7 @@ TEST_CASE( "Repeated terminate()-races-with-dispatch() stays race-free" ) {
 		std::atomic<int> count1(0);
 		std::thread thread1([dispatch, &count1]() {
 			try {
-				dispatch->dispatch({2, 5, 20, 10}, [&count1](Flattener<>& flattener, size_t flatIndex){
+				dispatch->dispatch({2, 5, 20, 10}, [&count1](Flattener<>&, size_t){
 					count1++;
 				});
 			} catch(const std::logic_error&) {
@@ -262,7 +262,7 @@ TEST_CASE( "Concurrent dispatch() calls on the same instance throw instead of co
 	auto aStartedFuture = aStarted.get_future();
 	std::atomic<int> countA(0);
 	std::thread threadA([&]() {
-		dispatch.dispatch({2, 5, 200, 10}, [&](Flattener<>& flattener, size_t flatIndex){
+		dispatch.dispatch({2, 5, 200, 10}, [&](Flattener<>&, size_t flatIndex){
 			if(flatIndex == 0)
 				aStarted.set_value();
 			std::this_thread::sleep_for(std::chrono::microseconds(50));
@@ -272,7 +272,7 @@ TEST_CASE( "Concurrent dispatch() calls on the same instance throw instead of co
 
 	aStartedFuture.wait();
 
-	CHECK_THROWS_AS(dispatch.dispatch({4}, [](Flattener<>& flattener, size_t flatIndex){}), std::logic_error);
+	CHECK_THROWS_AS(dispatch.dispatch({4}, [](Flattener<>&, size_t){}), std::logic_error);
 
 	threadA.join();
 }
@@ -282,7 +282,7 @@ TEST_CASE( "dispatch() after terminate() throws instead of silently doing no wor
 	dispatch.terminate();
 
 	std::atomic<int> count(0);
-	CHECK_THROWS_AS(dispatch.dispatch(100, [&count](Flattener<>& flattener, size_t flatIndex){
+	CHECK_THROWS_AS(dispatch.dispatch(100, [&count](Flattener<>&, size_t){
 		count++;
 	}), std::logic_error);
 
@@ -292,7 +292,7 @@ TEST_CASE( "dispatch() after terminate() throws instead of silently doing no wor
 TEST_CASE( "Repeated explicit terminate() calls are idempotent" ) {
 	Dispatcher dispatch(4);
 	std::atomic<int> count(0);
-	dispatch.dispatch(10, [&count](Flattener<>& flattener, size_t flatIndex){
+	dispatch.dispatch(10, [&count](Flattener<>&, size_t){
 		count++;
 	});
 
@@ -319,10 +319,10 @@ TEST_CASE( "Reentrant dispatch() from within a worker callback throws instead of
 	Dispatcher dispatch(4);
 	bool innerThrew = false;
 
-	dispatch.dispatch(4, [&](Flattener<>& flattener, size_t flatIndex){
+	dispatch.dispatch(4, [&](Flattener<>&, size_t flatIndex){
 		if(flatIndex == 0) {
 			try {
-				dispatch.dispatch(2, [](Flattener<>& f, size_t i){});
+				dispatch.dispatch(2, [](Flattener<>&, size_t){});
 			} catch(const std::logic_error&) {
 				innerThrew = true;
 			}
@@ -336,7 +336,7 @@ TEST_CASE( "A worker callback that throws propagates to the dispatch() caller in
 	std::atomic<int> count(0);
 	Dispatcher dispatch(4);
 
-	CHECK_THROWS_AS(dispatch.dispatch(20, [&count](Flattener<>& flattener, size_t flatIndex){
+	CHECK_THROWS_AS(dispatch.dispatch(20, [&count](Flattener<>&, size_t flatIndex){
 		count++;
 		if(flatIndex == 5)
 			throw std::runtime_error("worker callback failure");
@@ -356,7 +356,7 @@ TEST_CASE( "terminate() called from within one of its own worker callbacks throw
 	Dispatcher* dispatch = new Dispatcher(4);
 	std::atomic<int> count(0);
 
-	CHECK_THROWS_AS(dispatch->dispatch(4, [&](Flattener<>& flattener, size_t flatIndex){
+	CHECK_THROWS_AS(dispatch->dispatch(4, [&](Flattener<>&, size_t flatIndex){
 		count++;
 		if(flatIndex == 0)
 			dispatch->terminate();

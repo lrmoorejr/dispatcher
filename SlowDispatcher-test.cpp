@@ -47,7 +47,7 @@ TEST_CASE("SlowDispatcher Unknown thread count" ) {
 TEST_CASE("SlowDispatcher Simple dispatch" ) {
 	SlowDispatcher* dispatch = new SlowDispatcher(1);
 	CHECK(1 == dispatch->getThreadCount());
-	dispatch->dispatch(1, [](Flattener<>& flattener, size_t flatIndex){printf("Simple dispatch called\n");});
+	dispatch->dispatch(1, [](Flattener<>&, size_t){printf("Simple dispatch called\n");});
 	delete dispatch;
 }
 
@@ -55,7 +55,7 @@ TEST_CASE("SlowDispatcher Simple dispatch, 3 count" ) {
 	SlowDispatcher* dispatch = new SlowDispatcher(1);
 	CHECK(1 == dispatch->getThreadCount());
 	std::atomic<int> count(0);
-	dispatch->dispatch(3, [&count](Flattener<>& flattener, size_t flatIndex){
+	dispatch->dispatch(3, [&count](Flattener<>&, size_t){
 		count++;
 	});
 	delete dispatch;
@@ -67,7 +67,7 @@ TEST_CASE("SlowDispatcher Simple dispatch, 0 count" ) {
 	SlowDispatcher* dispatch = new SlowDispatcher(1);
 	CHECK(1 == dispatch->getThreadCount());
 	std::atomic<int> count(0);
-	CHECK_THROWS(dispatch->dispatch(0, [&count](Flattener<>& flattener, size_t flatIndex){ count++;}));
+	CHECK_THROWS(dispatch->dispatch(0, [&count](Flattener<>&, size_t){ count++;}));
 	delete dispatch;
 
 	CHECK(0 == count);
@@ -77,7 +77,7 @@ TEST_CASE("SlowDispatcher Simple dispatch, 0 on one dimension" ) {
 	SlowDispatcher* dispatch = new SlowDispatcher(1);
 	CHECK(1 == dispatch->getThreadCount());
 	std::atomic<int> count(0);
-	CHECK_THROWS(dispatch->dispatch({3,4,0,3,4}, [&count](Flattener<>& flattener, size_t flatIndex){ count++;}));
+	CHECK_THROWS(dispatch->dispatch({3,4,0,3,4}, [&count](Flattener<>&, size_t){ count++;}));
 	delete dispatch;
 
 	CHECK(0 == count);
@@ -87,7 +87,7 @@ TEST_CASE("SlowDispatcher Simple dispatch, 4 threads, 4 count" ) {
 	SlowDispatcher* dispatch = new SlowDispatcher();
 	CHECK(1 == dispatch->getThreadCount());
 	std::atomic<int> count(0);
-	dispatch->dispatch(4, [&count](Flattener<>& flattener, size_t flatIndex){
+	dispatch->dispatch(4, [&count](Flattener<>&, size_t){
 		count++;
 	});
 	delete dispatch;
@@ -99,7 +99,7 @@ TEST_CASE("SlowDispatcher Simple dispatch, 2 threads, 100 count" ) {
 	SlowDispatcher* dispatch = new SlowDispatcher();
 	CHECK(1 == dispatch->getThreadCount());
 	std::atomic<int> count(0);
-	dispatch->dispatch(100, [&count](Flattener<>& flattener, size_t flatIndex){
+	dispatch->dispatch(100, [&count](Flattener<>&, size_t){
 		count++;
 	});
 	delete dispatch;
@@ -111,7 +111,7 @@ TEST_CASE("SlowDispatcher Simple dispatch, 100 threads, 2 count" ) {
 	SlowDispatcher* dispatch = new SlowDispatcher();
 	CHECK(1 == dispatch->getThreadCount());
 	std::atomic<int> count(0);
-	dispatch->dispatch(2, [&count](Flattener<>& flattener, size_t flatIndex){
+	dispatch->dispatch(2, [&count](Flattener<>&, size_t){
 		count++;
 	});
 	delete dispatch;
@@ -123,7 +123,7 @@ TEST_CASE("SlowDispatcher Weird shape (100000 total), 8 threads" ) {
 	SlowDispatcher* dispatch = new SlowDispatcher();
 	CHECK(1 == dispatch->getThreadCount());
 	std::atomic<int> count(0);
-	dispatch->dispatch({2, 5, 10, 100, 10}, [&count](Flattener<>& flattener, size_t flatIndex){
+	dispatch->dispatch({2, 5, 10, 100, 10}, [&count](Flattener<>&, size_t){
 		count++;
 	});
 	delete dispatch;
@@ -136,7 +136,7 @@ TEST_CASE("SlowDispatcher Overlapping jobs" ) {
 
 	std::atomic<int> count1(0);
 	std::thread thread1([dispatch, &count1]() {
-		dispatch->dispatch({2, 5, 10, 10}, [&count1](Flattener<>& flattener, size_t flatIndex){
+		dispatch->dispatch({2, 5, 10, 10}, [&count1](Flattener<>&, size_t){
 			std::this_thread::sleep_for (std::chrono::milliseconds(10));
 			count1++;
 		});
@@ -144,7 +144,7 @@ TEST_CASE("SlowDispatcher Overlapping jobs" ) {
 
 	std::atomic<int> count2(0);
 	std::thread thread2([dispatch, &count2]() {
-		dispatch->dispatch({2, 5, 10, 10}, [&count2](Flattener<>& flattener, size_t flatIndex){
+		dispatch->dispatch({2, 5, 10, 10}, [&count2](Flattener<>&, size_t){
 			std::this_thread::sleep_for (std::chrono::milliseconds(10));
 			count2++;
 		});
@@ -162,7 +162,7 @@ TEST_CASE("SlowDispatcher Overlapping jobs" ) {
 TEST_CASE("SlowDispatcher Shape completedness test" ) {
 	SlowDispatcher* dispatch = new SlowDispatcher();
 	CHECK(1 == dispatch->getThreadCount());
-	bool ran[2][2][2][2][2] = {false};
+	bool ran[2][2][2][2][2] = {};
 	dispatch->dispatch({2, 2, 2, 2, 2}, [&ran](Flattener<>& flattener, size_t flatIndex){
 		int a = flattener.index(0, flatIndex);
 		REQUIRE(a >= 0);
@@ -202,7 +202,7 @@ TEST_CASE("SlowDispatcher Fast early termination" ) {
 	std::atomic<int> count1(0);
 	std::thread thread1([dispatch, &count1]() {
 		try {
-			dispatch->dispatch({2, 5, 100, 10}, [&count1](Flattener<>& flattener, size_t flatIndex){
+			dispatch->dispatch({2, 5, 100, 10}, [&count1](Flattener<>&, size_t){
 				std::this_thread::sleep_for (std::chrono::milliseconds(10));
 				count1++;
 			});
@@ -226,7 +226,7 @@ TEST_CASE("SlowDispatcher Early termination half way through" ) {
 
 	std::atomic<int> count1(0);
 	std::thread thread1([dispatch, &count1]() {
-		dispatch->dispatch({2, 5, 100, 10}, [&count1](Flattener<>& flattener, size_t flatIndex){
+		dispatch->dispatch({2, 5, 100, 10}, [&count1](Flattener<>&, size_t){
 			std::this_thread::sleep_for (std::chrono::milliseconds(10));
 			count1++;
 		});
@@ -247,7 +247,7 @@ TEST_CASE("SlowDispatcher Early termination half way through" ) {
 TEST_CASE("SlowDispatcher Repeated explicit terminate() calls are idempotent") {
 	SlowDispatcher dispatch;
 	std::atomic<int> count(0);
-	dispatch.dispatch(10, [&count](Flattener<>& flattener, size_t flatIndex){
+	dispatch.dispatch(10, [&count](Flattener<>&, size_t){
 		count++;
 	});
 
@@ -265,7 +265,7 @@ TEST_CASE("SlowDispatcher terminate() called from within its own dispatch() call
 	SlowDispatcher dispatch;
 	std::atomic<int> count(0);
 
-	dispatch.dispatch(100, [&](Flattener<>& flattener, size_t flatIndex){
+	dispatch.dispatch(100, [&](Flattener<>&, size_t flatIndex){
 		count++;
 		if(flatIndex == 4)
 			dispatch.terminate();
@@ -282,7 +282,7 @@ TEST_CASE("SlowDispatcher worker callback exceptions propagate normally, no thre
 	SlowDispatcher dispatch;
 	std::atomic<int> count(0);
 
-	CHECK_THROWS_AS(dispatch.dispatch(20, [&count](Flattener<>& flattener, size_t flatIndex){
+	CHECK_THROWS_AS(dispatch.dispatch(20, [&count](Flattener<>&, size_t flatIndex){
 		count++;
 		if(flatIndex == 5)
 			throw std::runtime_error("callback failure");
@@ -300,7 +300,7 @@ TEST_CASE("SlowDispatcher dispatch() after terminate() throws instead of silentl
 	dispatch.terminate();
 
 	std::atomic<int> count(0);
-	CHECK_THROWS_AS(dispatch.dispatch(10, [&count](Flattener<>& flattener, size_t flatIndex){
+	CHECK_THROWS_AS(dispatch.dispatch(10, [&count](Flattener<>&, size_t){
 		count++;
 	}), std::logic_error);
 

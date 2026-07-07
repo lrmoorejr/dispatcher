@@ -48,7 +48,7 @@ TEST_CASE( "Unknown thread count" ) {
 TEST_CASE( "Simple dispatch" ) {
 	BatchDispatcher<>* dispatch = new BatchDispatcher(1);
 	CHECK(1 == dispatch->getThreadCount());
-	dispatch->dispatch(1, 1, [](const Flattener<>& flattener, size_t flatIndex, unsigned int batch){printf("Simple dispatch called\n");});
+	dispatch->dispatch(1, 1, [](const Flattener<>&, size_t, unsigned int){printf("Simple dispatch called\n");});
 	delete dispatch;
 }
 
@@ -56,7 +56,7 @@ TEST_CASE( "Simple dispatch, 3 count" ) {
 	BatchDispatcher<>* dispatch = new BatchDispatcher(1);
 	CHECK(1 == dispatch->getThreadCount());
 	std::atomic<int> count(0);
-	dispatch->dispatch(3, 1, [&count](const Flattener<>& flattener, size_t flatIndex, unsigned int batch){
+	dispatch->dispatch(3, 1, [&count](const Flattener<>&, size_t, unsigned int){
 		count++;
 	});
 	delete dispatch;
@@ -68,7 +68,7 @@ TEST_CASE( "Simple dispatch, 0 count" ) {
 	BatchDispatcher<>* dispatch = new BatchDispatcher(1);
 	CHECK(1 == dispatch->getThreadCount());
 	std::atomic<int> count(0);
-	CHECK_THROWS(dispatch->dispatch(0, 1, [&count](const Flattener<>& flattener, size_t flatIndex, unsigned int batch){ count++;}));
+	CHECK_THROWS(dispatch->dispatch(0, 1, [&count](const Flattener<>&, size_t, unsigned int){ count++;}));
 	delete dispatch;
 
 	CHECK(0 == count);
@@ -78,7 +78,7 @@ TEST_CASE( "Simple dispatch, 0 on one dimension" ) {
 	BatchDispatcher<>* dispatch = new BatchDispatcher(1);
 	CHECK(1 == dispatch->getThreadCount());
 	std::atomic<int> count(0);
-	CHECK_THROWS(dispatch->dispatch({3,4,0,3,4}, 1, [&count](const Flattener<>& flattener, size_t flatIndex, unsigned int batch){ count++;}));
+	CHECK_THROWS(dispatch->dispatch({3,4,0,3,4}, 1, [&count](const Flattener<>&, size_t, unsigned int){ count++;}));
 	delete dispatch;
 
 	CHECK(0 == count);
@@ -88,7 +88,7 @@ TEST_CASE( "Simple dispatch, 4 threads, 4 count" ) {
 	BatchDispatcher<>* dispatch = new BatchDispatcher(4);
 	CHECK(4 == dispatch->getThreadCount());
 	std::atomic<int> count(0);
-	dispatch->dispatch(4, 100, [&count](const Flattener<>& flattener, size_t flatIndex, unsigned int batch){
+	dispatch->dispatch(4, 100, [&count](const Flattener<>&, size_t, unsigned int batch){
 		count += batch;
 	});
 	delete dispatch;
@@ -100,7 +100,7 @@ TEST_CASE( "Simple dispatch, 2 threads, 100 count" ) {
 	BatchDispatcher<>* dispatch = new BatchDispatcher(2);
 	CHECK(2 == dispatch->getThreadCount());
 	std::atomic<int> count(0);
-	dispatch->dispatch(100, 7, [&count](const Flattener<>& flattener, size_t flatIndex, unsigned int batch){
+	dispatch->dispatch(100, 7, [&count](const Flattener<>&, size_t, unsigned int batch){
 		count += batch;
 	});
 	delete dispatch;
@@ -112,7 +112,7 @@ TEST_CASE( "Simple dispatch, 100 threads, 2 count" ) {
 	BatchDispatcher<>* dispatch = new BatchDispatcher(100);
 	CHECK(100 == dispatch->getThreadCount());
 	std::atomic<int> count(0);
-	dispatch->dispatch(2, 13, [&count](const Flattener<>& flattener, size_t flatIndex, unsigned int batch){
+	dispatch->dispatch(2, 13, [&count](const Flattener<>&, size_t, unsigned int batch){
 		count += batch;
 	});
 	delete dispatch;
@@ -124,7 +124,7 @@ TEST_CASE( "Weird shape (100000 total), 8 threads" ) {
 	BatchDispatcher<>* dispatch = new BatchDispatcher(8);
 	CHECK(8 == dispatch->getThreadCount());
 	std::atomic<int> count(0);
-	dispatch->dispatch({2, 5, 10, 100, 10}, 41, [&count](const Flattener<>& flattener, size_t flatIndex, unsigned int batch){
+	dispatch->dispatch({2, 5, 10, 100, 10}, 41, [&count](const Flattener<>&, size_t, unsigned int batch){
 		count += batch;
 	});
 	delete dispatch;
@@ -136,13 +136,13 @@ TEST_CASE( "Reused dispatch" ) {
 	BatchDispatcher<>* dispatch = new BatchDispatcher(100);
 
 	std::atomic<int> count1(0);
-	dispatch->dispatch({2, 5, 100, 10}, 5, [&count1](const Flattener<>& flattener, size_t flatIndex, unsigned int batch){
+	dispatch->dispatch({2, 5, 100, 10}, 5, [&count1](const Flattener<>&, size_t, unsigned int batch){
 		std::this_thread::sleep_for (std::chrono::milliseconds(10));
 		count1 += batch;
 	});
 
 	std::atomic<int> count2(0);
-	dispatch->dispatch({2, 5, 100, 10}, 2, [&count2](const Flattener<>& flattener, size_t flatIndex, unsigned int batch){
+	dispatch->dispatch({2, 5, 100, 10}, 2, [&count2](const Flattener<>&, size_t, unsigned int batch){
 		std::this_thread::sleep_for (std::chrono::milliseconds(10));
 		count2 += batch;
 	});
@@ -162,7 +162,7 @@ TEST_CASE( "Shape completedness test" ) {
 	// thread-safe flag instead, and assert on it after dispatch() returns.
 	BatchDispatcher<>* dispatch = new BatchDispatcher(8);
 	CHECK(8 == dispatch->getThreadCount());
-	bool ran[2][5][10][100][10] = {false};
+	bool ran[2][5][10][100][10] = {};
 	std::atomic<bool> outOfRange = {false};
 	dispatch->dispatch({2, 5, 10, 100, 10}, 11, [&ran, &outOfRange](const Flattener<>& flattener, size_t flatIndex, unsigned int batch){
 		for(unsigned int index = 0; index < batch; ++index) {
@@ -197,7 +197,7 @@ TEST_CASE( "Shape completedness test" ) {
 
 TEST_CASE( "Default dispatch, 300 count" ) {
 	std::atomic<int> count(0);
-	BatchDispatcher<>::defaultDispatch(300, 7, [&count](const Flattener<>& flattener, size_t flatIndex, unsigned int batch){
+	BatchDispatcher<>::defaultDispatch(300, 7, [&count](const Flattener<>&, size_t, unsigned int batch){
 		count += batch;
 	});
 
@@ -210,7 +210,7 @@ TEST_CASE( "Unbashed default dispatch, 300 count" ) {
 	// thread-safe flag instead, and assert on it after dispatch() returns.
 	std::atomic<int> count(0);
 	std::atomic<bool> batchWasNotOne = {false};
-	BatchDispatcher<>::defaultDispatch(300, [&count, &batchWasNotOne](const Flattener<>& flattener, size_t flatIndex, unsigned int batch){
+	BatchDispatcher<>::defaultDispatch(300, [&count, &batchWasNotOne](const Flattener<>&, size_t, unsigned int batch){
 		if(batch != 1)
 			batchWasNotOne = true;
 		count += 1;
@@ -231,7 +231,7 @@ TEST_CASE( "Concurrent dispatch() calls on the same instance throw instead of co
 	auto aStartedFuture = aStarted.get_future();
 	std::atomic<int> countA(0);
 	std::thread threadA([&]() {
-		dispatch.dispatch(2000, 7, [&](const Flattener<>& flattener, size_t start, unsigned int batch){
+		dispatch.dispatch(2000, 7, [&](const Flattener<>&, size_t start, unsigned int batch){
 			if(start == 0)
 				aStarted.set_value();
 			std::this_thread::sleep_for(std::chrono::microseconds(50));
@@ -241,7 +241,7 @@ TEST_CASE( "Concurrent dispatch() calls on the same instance throw instead of co
 
 	aStartedFuture.wait();
 
-	CHECK_THROWS_AS(dispatch.dispatch(4, 1, [](const Flattener<>& flattener, size_t start, unsigned int batch){}), std::logic_error);
+	CHECK_THROWS_AS(dispatch.dispatch(4, 1, [](const Flattener<>&, size_t, unsigned int){}), std::logic_error);
 
 	threadA.join();
 	CHECK(2000 == countA);
@@ -251,7 +251,7 @@ TEST_CASE( "A worker callback that throws propagates to the dispatch() caller in
 	std::atomic<int> count(0);
 	BatchDispatcher<> dispatch(4);
 
-	CHECK_THROWS_AS(dispatch.dispatch(20, 1, [&count](const Flattener<>& flattener, size_t start, unsigned int batch){
+	CHECK_THROWS_AS(dispatch.dispatch(20, 1, [&count](const Flattener<>&, size_t start, unsigned int batch){
 		count += batch;
 		if(start == 5)
 			throw std::runtime_error("worker callback failure");
@@ -268,10 +268,10 @@ TEST_CASE( "Reentrant dispatch() from within a worker callback throws instead of
 	BatchDispatcher<> dispatch(4);
 	bool innerThrew = false;
 
-	dispatch.dispatch(4, 1, [&](const Flattener<>& flattener, size_t start, unsigned int batch){
+	dispatch.dispatch(4, 1, [&](const Flattener<>&, size_t start, unsigned int){
 		if(start == 0) {
 			try {
-				dispatch.dispatch(2, 1, [](const Flattener<>& f, size_t s, unsigned int b){});
+				dispatch.dispatch(2, 1, [](const Flattener<>&, size_t, unsigned int){});
 			} catch(const std::logic_error&) {
 				innerThrew = true;
 			}
@@ -287,7 +287,7 @@ TEST_CASE( "maxBatch of 0 throws instead of hanging forever" ) {
 	// would spin forever -- reject it upfront instead.
 	BatchDispatcher<> dispatch(2);
 
-	CHECK_THROWS_AS(dispatch.dispatch(10, 0, [](const Flattener<>& flattener, size_t start, unsigned int batch){}),
+	CHECK_THROWS_AS(dispatch.dispatch(10, 0, [](const Flattener<>&, size_t, unsigned int){}),
 		std::invalid_argument);
 }
 
@@ -300,7 +300,7 @@ TEST_CASE( "A count wider than unsigned int throws instead of silently truncatin
 	BatchDispatcher<> dispatch(2);
 	size_t tooLarge = static_cast<size_t>(std::numeric_limits<unsigned int>::max()) + 1;
 
-	CHECK_THROWS_AS(dispatch.dispatch(tooLarge, 10, [](const Flattener<>& flattener, size_t start, unsigned int batch){}),
+	CHECK_THROWS_AS(dispatch.dispatch(tooLarge, 10, [](const Flattener<>&, size_t, unsigned int){}),
 		std::overflow_error);
 }
 
@@ -311,7 +311,7 @@ TEST_CASE( "Small dispatch (fewer units than threads) still processes every unit
 	BatchDispatcher<> dispatch(16);
 	std::atomic<int> count(0);
 
-	dispatch.dispatch(3, 5, [&count](const Flattener<>& flattener, size_t start, unsigned int batch){
+	dispatch.dispatch(3, 5, [&count](const Flattener<>&, size_t, unsigned int batch){
 		count += batch;
 	});
 
@@ -324,7 +324,7 @@ TEST_CASE( "Uneven tail with many threads still processes every unit exactly onc
 	BatchDispatcher<> dispatch(8);
 	std::atomic<size_t> count(0);
 
-	dispatch.dispatch(1'000'003, 4096, [&count](const Flattener<>& flattener, size_t start, unsigned int batch){
+	dispatch.dispatch(1'000'003, 4096, [&count](const Flattener<>&, size_t, unsigned int batch){
 		count += batch;
 	});
 
@@ -347,7 +347,7 @@ TEST_CASE( "Repeated concurrent dispatch() calls, some throwing, never lose an e
 	auto hammer = [&](bool shouldThrow) {
 		while(!stop.load()) {
 			try {
-				dispatch.dispatch(40, 5, [&](const Flattener<>& flattener, size_t start, unsigned int batch){
+				dispatch.dispatch(40, 5, [&](const Flattener<>&, size_t start, unsigned int){
 					if(shouldThrow && start == 0)
 						throw std::runtime_error("expected");
 				});
@@ -379,7 +379,7 @@ TEST_CASE( "Non-default T instantiation processes every unit exactly once" ) {
 	BatchDispatcher<uint32_t> dispatch(8);
 	std::atomic<uint32_t> count(0);
 
-	dispatch.dispatch(static_cast<uint32_t>(10007), 13, [&count](const Flattener<uint32_t>& flattener, uint32_t start, unsigned int batch){
+	dispatch.dispatch(static_cast<uint32_t>(10007), 13, [&count](const Flattener<uint32_t>&, uint32_t, unsigned int batch){
 		count += batch;
 	});
 
@@ -395,7 +395,7 @@ TEST_CASE( "maxBatch far larger than the whole space uses a single batch" ) {
 	std::atomic<int> count(0);
 	std::atomic<int> invocations(0);
 
-	dispatch.dispatch(50, 10000, [&](const Flattener<>& flattener, size_t start, unsigned int batch){
+	dispatch.dispatch(50, 10000, [&](const Flattener<>&, size_t, unsigned int batch){
 		count += batch;
 		invocations++;
 	});
@@ -414,7 +414,7 @@ TEST_CASE( "activeWorkers-based tail division shares work across several threads
 	std::atomic<int> count(0);
 	std::atomic<int> invocations(0);
 
-	dispatch.dispatch(320, 50, [&](const Flattener<>& flattener, size_t start, unsigned int batch){
+	dispatch.dispatch(320, 50, [&](const Flattener<>&, size_t, unsigned int batch){
 		count += batch;
 		invocations++;
 	});
@@ -433,7 +433,7 @@ TEST_CASE( "A batch smaller than maxBatch is actually observed when the space do
 	std::atomic<bool> sawPartialBatch(false);
 	const unsigned int maxBatch = 64;
 
-	dispatch.dispatch(1000, maxBatch, [&](const Flattener<>& flattener, size_t start, unsigned int batch){
+	dispatch.dispatch(1000, maxBatch, [&](const Flattener<>&, size_t, unsigned int batch){
 		count += batch;
 		if(batch < maxBatch)
 			sawPartialBatch = true;
@@ -450,7 +450,7 @@ TEST_CASE( "Many batches throwing concurrently within one call still yield exact
 	BatchDispatcher<> dispatch(8);
 	std::atomic<int> count(0);
 
-	CHECK_THROWS_AS(dispatch.dispatch(100, 1, [&count](const Flattener<>& flattener, size_t start, unsigned int batch){
+	CHECK_THROWS_AS(dispatch.dispatch(100, 1, [&count](const Flattener<>&, size_t, unsigned int batch){
 		count += batch;
 		throw std::runtime_error("every batch fails");
 	}), std::runtime_error);
