@@ -1,5 +1,7 @@
 # Dispatcher / BatchDispatcher / SlowDispatcher
 
+[API docs](https://lrmoorejr.github.io/dispatcher/)
+
 Three interchangeable ways to run a callback over every point in an N-dimensional index space
 (sized and addressed via [`Flattener<>`](https://github.com/lrmoorejr/flattener)), spread across a
 thread pool. They share the same shape: give the dispatcher a shape and a worker function, and it
