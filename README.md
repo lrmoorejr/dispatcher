@@ -128,4 +128,4 @@ use the `Flattener<T>` overload with multiple dimensions instead).
 
 ## License
 
-Apache License 2.0 -- see [LICENSE](LICENSE).
+Apache License 2.0 -- see [LICENSE](https://github.com/lrmoorejr/dispatcher/blob/main/LICENSE).
